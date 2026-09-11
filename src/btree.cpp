@@ -37,6 +37,7 @@
 
 #include <cassert>
 #include <cstring>
+#include <stdexcept>
 
 // Helper functions used to pack/unpack fixed width ints during encode and decode
 namespace {
@@ -344,3 +345,50 @@ void node_replace_child_n(
     node_append_range(new_node, old, idx + inc, idx + 1, old.nkeys() - (idx + 1));
 }
 
+// ============================================================================
+// BTree Insert
+// ============================================================================
+namespace {
+    void check_limit(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+        if (key.empty()) {
+            throw std::invalid_argument("empty key");
+        }
+        if (key.size() > BTREE_MAX_KEY_SIZE) {
+            throw std::invalid_argument("key too large");
+        }
+        if (val.size() > BTREE_MAX_VAL_SIZE) {
+            throw std::invalid_argument("value too large");
+        }
+    }
+}
+
+void BTree::insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+    check_limit(key, val);
+
+    if (root == 0) {
+        // The first root: a leaf holding a dummy sentinel key so a lookup always finds a position.
+        BNode new_root(BTREE_PAGE_SIZE);
+        new_root.set_header(BNODE_LEAF, 2);
+        new_root.node_append_kv(0, 0, {}, {}); // an empty std::vector is lexicographically smaller than an non empty std::vector
+        new_root.node_append_kv(1, 0, key, val);
+        root = pages->new_page(new_root);
+        return;
+    }
+
+    BNode updated = tree_insert(*this, pages->get(root), key, val);
+    std::vector<BNode> split = node_split_if_needed(updated);
+    pages->del(root);
+
+    if (split.size() > 1) {
+        // The root was split: add a new level.
+        BNode new_root(BTREE_PAGE_SIZE);
+        new_root.set_header(BNODE_NODE, static_cast<uint16_t>(split.size()));
+        for (uint16_t i = 0; i < split.size(); ++i) {
+            uint64_t ptr = pages->new_page(split[i]);
+            new_root.node_append_kv(i, ptr, split[i].get_key(0), {});
+        }
+        root = pages->new_page(new_root);
+    } else {
+        root = pages->new_page(split[0]);
+    }
+}

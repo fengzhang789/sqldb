@@ -111,7 +111,6 @@ std::vector<BNode> node_split_if_needed(const BNode& node);
 // by a real file/mmap without changing any tree logic.
 struct PageManager {
     virtual ~PageManager() = default;
-
     virtual BNode get(uint64_t ptr) const = 0;
     virtual uint64_t new_page(const BNode& node) = 0;
     virtual void del(uint64_t ptr) = 0;
@@ -120,6 +119,7 @@ struct PageManager {
 struct BTree {
     uint64_t root = 0;
     PageManager* pages = nullptr;
+    void insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
 };
 
 // Recursively insert/update (key, val) starting at `node`, returning the new

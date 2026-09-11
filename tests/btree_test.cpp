@@ -1,6 +1,8 @@
 #include "btree.h"
 
 #include <cstdio>
+#include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <gtest/gtest.h>
 
@@ -801,3 +803,120 @@ TEST(TreeInsert, WhenChildOverflowsThenItSplitsAndParentGrowsByOneKey) {
     EXPECT_EQ(result.get_key(2), child1.get_key(0));
 }
 
+// ============================================================================
+// BTree::insert: high-level KV interface
+// ============================================================================
+namespace {
+    // No Get() has been added to BTree yet; this mirrors the same root-to-leaf
+    // traversal used internally to look a key up for test assertions.
+    std::optional<std::vector<uint8_t>> btree_get(const BTree& tree, const std::vector<uint8_t>& key) {
+        if (tree.root == 0) {
+            return std::nullopt;
+        }
+        BNode node = tree.pages->get(tree.root);
+        while (true) {
+            int64_t idx = node_lookup_le(node, key);
+            if (idx < 0) {
+                return std::nullopt;
+            }
+            if (node.btype() == BNODE_LEAF) {
+                if (node.get_key(static_cast<uint16_t>(idx)) == key) {
+                    return node.get_val(static_cast<uint16_t>(idx));
+                }
+                return std::nullopt;
+            }
+            node = tree.pages->get(node.get_ptr(static_cast<uint16_t>(idx)));
+        }
+    }
+}
+
+TEST(BTreeInsert, WhenTreeIsEmptyThenFirstInsertCreatesSentinelRoot) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    ASSERT_NE(tree.root, 0u);
+    BNode root = pages.get(tree.root);
+    EXPECT_EQ(root.btype(), BNODE_LEAF);
+    EXPECT_EQ(root.nkeys(), 2); // sentinel + the inserted key
+    EXPECT_TRUE(root.get_key(0).empty());
+    EXPECT_EQ(str(root.get_key(1)), "k1");
+    EXPECT_EQ(str(root.get_val(1)), "v1");
+}
+
+TEST(BTreeInsert, WhenKeyIsInsertedThenItIsRetrievable) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    auto val = btree_get(tree, bytes("k1"));
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(str(*val), "v1");
+    EXPECT_FALSE(btree_get(tree, bytes("missing")).has_value());
+}
+
+TEST(BTreeInsert, WhenMultipleKeysAreInsertedThenAllAreRetrievable) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    tree.insert(bytes("k3"), bytes("v3"));
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k2"), bytes("v2"));
+
+    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "v1");
+    EXPECT_EQ(str(*btree_get(tree, bytes("k2"))), "v2");
+    EXPECT_EQ(str(*btree_get(tree, bytes("k3"))), "v3");
+}
+
+TEST(BTreeInsert, WhenExistingKeyIsInsertedThenValueIsUpdated) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k1"), bytes("updated"));
+
+    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "updated");
+}
+
+TEST(BTreeInsert, WhenEnoughKeysAreInsertedThenRootSplitsAndTreeGrowsALevel) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    // Large values push a single page's worth of keys past BTREE_PAGE_SIZE,
+    // forcing the root to split and the tree to grow to height 2.
+    const int n = 30;
+    for (int i = 0; i < n; ++i) {
+        tree.insert(indexed_key(static_cast<uint32_t>(i), 100), std::vector<uint8_t>(100, 'v'));
+    }
+
+    BNode root = pages.get(tree.root);
+    EXPECT_EQ(root.btype(), BNODE_NODE);
+
+    for (int i = 0; i < n; ++i) {
+        auto val = btree_get(tree, indexed_key(static_cast<uint32_t>(i), 100));
+        ASSERT_TRUE(val.has_value()) << "missing key " << i;
+        EXPECT_EQ(val->size(), 100u);
+    }
+}
+
+TEST(BTreeInsert, WhenKeyIsEmptyThenInsertThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    EXPECT_THROW(tree.insert({}, bytes("v1")), std::invalid_argument);
+}
+
+TEST(BTreeInsert, WhenKeyExceedsMaxSizeThenInsertThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    std::vector<uint8_t> big_key(BTREE_MAX_KEY_SIZE + 1, 'x');
+    EXPECT_THROW(tree.insert(big_key, bytes("v1")), std::invalid_argument);
+}
+
+TEST(BTreeInsert, WhenValExceedsMaxSizeThenInsertThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    std::vector<uint8_t> big_val(BTREE_MAX_VAL_SIZE + 1, 'x');
+    EXPECT_THROW(tree.insert(bytes("k1"), big_val), std::invalid_argument);
+}
