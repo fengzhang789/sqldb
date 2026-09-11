@@ -187,3 +187,58 @@ BNode decode(const std::vector<uint8_t>& page) {
     return BNode(page);
 }
 
+// ============================================================================
+// Leaf insert / update
+// ============================================================================
+void node_append_range(
+    BNode& new_node, const BNode& old, uint16_t dst_new, uint16_t src_old, uint16_t n
+) {
+    for (uint16_t i = 0; i < n; ++i) {
+        uint16_t dst = dst_new + i;
+        uint16_t src = src_old + i;
+        new_node.node_append_kv(dst, old.get_ptr(src), old.get_key(src), old.get_val(src));
+    }
+}
+
+void leaf_insert(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+) {
+    new_node.set_header(BNODE_LEAF, old.nkeys() + 1);
+    node_append_range(new_node, old, 0, 0, idx);              // keys before idx
+    new_node.node_append_kv(idx, 0, key, val);                // the new key
+    node_append_range(new_node, old, idx + 1, idx, old.nkeys() - idx); // keys after idx
+}
+
+void leaf_update(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+) {
+    new_node.set_header(BNODE_LEAF, old.nkeys());
+    node_append_range(new_node, old, 0, 0, idx);
+    new_node.node_append_kv(idx, 0, key, val);
+    node_append_range(new_node, old, idx + 1, idx + 1, old.nkeys() - (idx + 1));
+}
+
+// ============================================================================
+// Lookup
+// ============================================================================
+int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key) {
+    int64_t lo = 0, hi = static_cast<int64_t>(node.nkeys()) - 1;
+    int64_t result = -1;
+    while (lo <= hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        std::vector<uint8_t> cur = node.get_key(static_cast<uint16_t>(mid));
+        if (cur == key) {
+            return mid;
+        }
+        if (cur < key) {
+            result = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    return result;
+}
+

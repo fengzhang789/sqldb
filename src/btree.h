@@ -63,3 +63,25 @@ struct BNode {
 std::vector<uint8_t> encode(const BNode& node);
 // decode wraps a page read from disk in a BNode.
 BNode decode(const std::vector<uint8_t>& page);
+
+// Copy n KV pairs (and their child pointers) starting at src_old in `old`
+// into `new_node` starting at dst_new.
+void node_append_range(
+    BNode& new_node, const BNode& old, uint16_t dst_new, uint16_t src_old, uint16_t n
+);
+
+// Build `new_node` as a copy of `old` with (key, val) inserted at idx.
+void leaf_insert(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+);
+
+// Build `new_node` as a copy of `old` with the value at idx replaced by val.
+void leaf_update(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+);
+
+// Find the last position whose key is less than or equal to `key`.
+// Returns -1 if all keys are greater than `key`.
+int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key);

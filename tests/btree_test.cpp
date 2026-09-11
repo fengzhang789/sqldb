@@ -1,5 +1,6 @@
 #include "btree.h"
 
+#include <cstdio>
 #include <gtest/gtest.h>
 
 namespace {
@@ -214,5 +215,280 @@ TEST(EncodeDecode, WhenInternalNodeIsEncodedThenDecodedNodeMatchesOriginal) {
 TEST(EncodeDecode, WhenPageSizeIsWrongThenDecodeAsserts) {
     std::vector<uint8_t> bad_page(BTREE_PAGE_SIZE - 1, 0);
     EXPECT_DEATH(decode(bad_page), "");
+}
+
+// ============================================================================
+// node_append_range
+// ============================================================================
+TEST(NodeAppendRange, WhenRangeIsCopiedThenKeysAndValsMatchSource) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 3);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+    old.node_append_kv(2, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    new_node.set_header(BNODE_LEAF, 3);
+    node_append_range(new_node, old, 0, 0, 3);
+
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
+    EXPECT_EQ(str(new_node.get_val(0)), "v1");
+    EXPECT_EQ(str(new_node.get_val(1)), "v2");
+    EXPECT_EQ(str(new_node.get_val(2)), "v3");
+}
+
+TEST(NodeAppendRange, WhenCopyingSubsetThenOnlySelectedKeysAreCopied) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 3);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+    old.node_append_kv(2, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    new_node.set_header(BNODE_LEAF, 2);
+    node_append_range(new_node, old, 0, 1, 2); // copy k2, k3
+
+    EXPECT_EQ(str(new_node.get_key(0)), "k2");
+    EXPECT_EQ(str(new_node.get_key(1)), "k3");
+}
+
+TEST(NodeAppendRange, WhenNIsZeroThenNothingIsCopied) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 1);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+
+    BNode new_node;
+    new_node.set_header(BNODE_LEAF, 0);
+    node_append_range(new_node, old, 0, 0, 0);
+
+    EXPECT_EQ(new_node.nbytes(), new_node.kv_base_offset());
+}
+
+// ============================================================================
+// leaf_insert
+// ============================================================================
+TEST(LeafInsert, WhenInsertingAtBeginningThenNewKeyComesFirst) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k2"), bytes("v2"));
+    old.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    leaf_insert(new_node, old, 0, bytes("k1"), bytes("v1"));
+
+    EXPECT_EQ(new_node.nkeys(), 3);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_val(0)), "v1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
+}
+
+TEST(LeafInsert, WhenInsertingInMiddleThenExistingKeysShiftAround) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    leaf_insert(new_node, old, 1, bytes("k2"), bytes("v2"));
+
+    EXPECT_EQ(new_node.nkeys(), 3);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+    EXPECT_EQ(str(new_node.get_val(1)), "v2");
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
+}
+
+TEST(LeafInsert, WhenInsertingAtEndThenNewKeyComesLast) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode new_node;
+    leaf_insert(new_node, old, 2, bytes("k3"), bytes("v3"));
+
+    EXPECT_EQ(new_node.nkeys(), 3);
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
+    EXPECT_EQ(str(new_node.get_val(2)), "v3");
+}
+
+TEST(LeafInsert, WhenInsertingIntoEmptyNodeThenSingleKeyIsStored) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 0);
+
+    BNode new_node;
+    leaf_insert(new_node, old, 0, bytes("k1"), bytes("v1"));
+
+    EXPECT_EQ(new_node.nkeys(), 1);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_val(0)), "v1");
+}
+
+// ============================================================================
+// leaf_update
+// ============================================================================
+TEST(LeafUpdate, WhenUpdatingMiddleKeyThenOnlyItsValueChanges) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 3);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+    old.node_append_kv(2, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    leaf_update(new_node, old, 1, bytes("k2"), bytes("updated"));
+
+    EXPECT_EQ(new_node.nkeys(), 3);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_val(0)), "v1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+    EXPECT_EQ(str(new_node.get_val(1)), "updated");
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
+    EXPECT_EQ(str(new_node.get_val(2)), "v3");
+}
+
+TEST(LeafUpdate, WhenUpdatingFirstKeyThenValueChangesAndOrderPreserved) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode new_node;
+    leaf_update(new_node, old, 0, bytes("k1"), bytes("updated"));
+
+    EXPECT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(str(new_node.get_val(0)), "updated");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+}
+
+TEST(LeafUpdate, WhenUpdatingLastKeyThenValueChangesAndOrderPreserved) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode new_node;
+    leaf_update(new_node, old, 1, bytes("k2"), bytes("updated"));
+
+    EXPECT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_val(1)), "updated");
+}
+
+// ============================================================================
+// node_lookup_le
+// ============================================================================
+TEST(NodeLookupLE, WhenKeyMatchesExactlyThenIndexOfMatchIsReturned) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 3);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+    node.node_append_kv(2, 0, bytes("k5"), bytes("v5"));
+
+    EXPECT_EQ(node_lookup_le(node, bytes("k3")), 1);
+}
+
+TEST(NodeLookupLE, WhenKeyFallsBetweenEntriesThenLowerIndexIsReturned) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 3);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+    node.node_append_kv(2, 0, bytes("k5"), bytes("v5"));
+
+    EXPECT_EQ(node_lookup_le(node, bytes("k4")), 1);
+}
+
+TEST(NodeLookupLE, WhenKeyIsGreaterThanAllEntriesThenLastIndexIsReturned) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 3);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+    node.node_append_kv(2, 0, bytes("k5"), bytes("v5"));
+
+    EXPECT_EQ(node_lookup_le(node, bytes("k9")), 2);
+}
+
+TEST(NodeLookupLE, WhenKeyIsLessThanAllEntriesThenNegativeOneIsReturned) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 3);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+    node.node_append_kv(2, 0, bytes("k5"), bytes("v5"));
+
+    EXPECT_EQ(node_lookup_le(node, bytes("k0")), -1);
+}
+
+TEST(NodeLookupLE, WhenNodeIsEmptyThenNegativeOneIsReturned) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 0);
+
+    EXPECT_EQ(node_lookup_le(node, bytes("k1")), -1);
+}
+
+TEST(NodeLookupLE, WhenManyKeysThenEveryPositionIsFoundCorrectly) {
+    // Exercises binary search across even/odd counts and both halves.
+    BNode node;
+    const int n = 16;
+    node.set_header(BNODE_LEAF, n);
+    for (int i = 0; i < n; ++i) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "k%02d", i * 2); // k00, k02, k04, ...
+        node.node_append_kv(static_cast<uint16_t>(i), 0, bytes(buf), bytes("v"));
+    }
+
+    for (int i = 0; i < n; ++i) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "k%02d", i * 2);
+        EXPECT_EQ(node_lookup_le(node, bytes(buf)), i) << "exact match at " << i;
+    }
+    // Odd keys fall strictly between two even keys.
+    EXPECT_EQ(node_lookup_le(node, bytes("k01")), 0);
+    EXPECT_EQ(node_lookup_le(node, bytes("k15")), 7);
+    EXPECT_EQ(node_lookup_le(node, bytes("k29")), 14);
+    EXPECT_EQ(node_lookup_le(node, bytes("k99")), n - 1);
+}
+
+// ============================================================================
+// Insert or update after a key lookup
+// ============================================================================
+TEST(LeafInsertOrUpdate, WhenKeyExistsThenUpdatePath) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 2);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    int64_t idx = node_lookup_le(node, bytes("k3"));
+    ASSERT_GE(idx, 0);
+
+    BNode new_node;
+    if (node.get_key(static_cast<uint16_t>(idx)) == bytes("k3")) {
+        leaf_update(new_node, node, static_cast<uint16_t>(idx), bytes("k3"), bytes("updated"));
+    } else {
+        FAIL() << "expected key match";
+    }
+
+    EXPECT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(str(new_node.get_val(1)), "updated");
+}
+
+TEST(LeafInsertOrUpdate, WhenKeyDoesNotExistThenInsertPath) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 2);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    int64_t idx = node_lookup_le(node, bytes("k2"));
+    ASSERT_GE(idx, 0);
+    ASSERT_NE(node.get_key(static_cast<uint16_t>(idx)), bytes("k2"));
+
+    BNode new_node;
+    leaf_insert(new_node, node, static_cast<uint16_t>(idx) + 1, bytes("k2"), bytes("v2"));
+
+    EXPECT_EQ(new_node.nkeys(), 3);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k2");
+    EXPECT_EQ(str(new_node.get_key(2)), "k3");
 }
 
