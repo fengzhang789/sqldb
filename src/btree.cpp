@@ -537,3 +537,29 @@ bool BTree::remove(const std::vector<uint8_t>& key) {
     }
     return true;
 }
+
+// ============================================================================
+// BTree Get
+// ============================================================================
+std::optional<std::vector<uint8_t>> BTree::get(const std::vector<uint8_t>& key) const {
+    check_key_limit(key);
+
+    if (root == 0) {
+        return std::nullopt;
+    }
+
+    BNode node = pages->get(root);
+    while (true) {
+        int64_t idx = node_lookup_le(node, key);
+        if (idx < 0) {
+            return std::nullopt;
+        }
+        if (node.btype() == BNODE_LEAF) {
+            if (node.get_key(static_cast<uint16_t>(idx)) == key) {
+                return node.get_val(static_cast<uint16_t>(idx));
+            }
+            return std::nullopt;
+        }
+        node = pages->get(node.get_ptr(static_cast<uint16_t>(idx)));
+    }
+}

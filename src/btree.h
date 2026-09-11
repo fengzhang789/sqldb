@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <optional>
 #include <utility>
 
 // Constants
@@ -135,6 +136,7 @@ struct BTree {
     PageManager* pages = nullptr;
     void insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
     bool remove(const std::vector<uint8_t>& key); // returns true if key found and deleted, false otherwise
+    std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) const; // returns std::nullopt if key dne
 };
 
 // Recursively insert/update (key, val) starting at `node`, returning the new

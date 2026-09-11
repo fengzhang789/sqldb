@@ -1175,30 +1175,6 @@ TEST(NodeDelete, WhenKeyNotFoundInChildSubtreeThenEmptyNodeIsReturned) {
 // ============================================================================
 // BTree::insert: high-level KV interface
 // ============================================================================
-namespace {
-    // No Get() has been added to BTree yet; this mirrors the same root-to-leaf
-    // traversal used internally to look a key up for test assertions.
-    std::optional<std::vector<uint8_t>> btree_get(const BTree& tree, const std::vector<uint8_t>& key) {
-        if (tree.root == 0) {
-            return std::nullopt;
-        }
-        BNode node = tree.pages->get(tree.root);
-        while (true) {
-            int64_t idx = node_lookup_le(node, key);
-            if (idx < 0) {
-                return std::nullopt;
-            }
-            if (node.btype() == BNODE_LEAF) {
-                if (node.get_key(static_cast<uint16_t>(idx)) == key) {
-                    return node.get_val(static_cast<uint16_t>(idx));
-                }
-                return std::nullopt;
-            }
-            node = tree.pages->get(node.get_ptr(static_cast<uint16_t>(idx)));
-        }
-    }
-}
-
 TEST(BTreeInsert, WhenTreeIsEmptyThenFirstInsertCreatesSentinelRoot) {
     InMemoryPageManager pages;
     BTree tree{0, &pages};
@@ -1220,10 +1196,10 @@ TEST(BTreeInsert, WhenKeyIsInsertedThenItIsRetrievable) {
 
     tree.insert(bytes("k1"), bytes("v1"));
 
-    auto val = btree_get(tree, bytes("k1"));
+    auto val = tree.get(bytes("k1"));
     ASSERT_TRUE(val.has_value());
     EXPECT_EQ(str(*val), "v1");
-    EXPECT_FALSE(btree_get(tree, bytes("missing")).has_value());
+    EXPECT_FALSE(tree.get(bytes("missing")).has_value());
 }
 
 TEST(BTreeInsert, WhenMultipleKeysAreInsertedThenAllAreRetrievable) {
@@ -1234,9 +1210,9 @@ TEST(BTreeInsert, WhenMultipleKeysAreInsertedThenAllAreRetrievable) {
     tree.insert(bytes("k1"), bytes("v1"));
     tree.insert(bytes("k2"), bytes("v2"));
 
-    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "v1");
-    EXPECT_EQ(str(*btree_get(tree, bytes("k2"))), "v2");
-    EXPECT_EQ(str(*btree_get(tree, bytes("k3"))), "v3");
+    EXPECT_EQ(str(*tree.get(bytes("k1"))), "v1");
+    EXPECT_EQ(str(*tree.get(bytes("k2"))), "v2");
+    EXPECT_EQ(str(*tree.get(bytes("k3"))), "v3");
 }
 
 TEST(BTreeInsert, WhenExistingKeyIsInsertedThenValueIsUpdated) {
@@ -1246,7 +1222,7 @@ TEST(BTreeInsert, WhenExistingKeyIsInsertedThenValueIsUpdated) {
     tree.insert(bytes("k1"), bytes("v1"));
     tree.insert(bytes("k1"), bytes("updated"));
 
-    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "updated");
+    EXPECT_EQ(str(*tree.get(bytes("k1"))), "updated");
 }
 
 TEST(BTreeInsert, WhenEnoughKeysAreInsertedThenRootSplitsAndTreeGrowsALevel) {
@@ -1264,7 +1240,7 @@ TEST(BTreeInsert, WhenEnoughKeysAreInsertedThenRootSplitsAndTreeGrowsALevel) {
     EXPECT_EQ(root.btype(), BNODE_NODE);
 
     for (int i = 0; i < n; ++i) {
-        auto val = btree_get(tree, indexed_key(static_cast<uint32_t>(i), 100));
+        auto val = tree.get(indexed_key(static_cast<uint32_t>(i), 100));
         ASSERT_TRUE(val.has_value()) << "missing key " << i;
         EXPECT_EQ(val->size(), 100u);
     }
@@ -1291,6 +1267,97 @@ TEST(BTreeInsert, WhenValExceedsMaxSizeThenInsertThrows) {
 }
 
 // ============================================================================
+// BTree::get: high-level KV interface
+// ============================================================================
+TEST(BTreeGet, WhenTreeIsEmptyThenReturnsNullopt) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    EXPECT_FALSE(tree.get(bytes("k1")).has_value());
+}
+
+TEST(BTreeGet, WhenKeyExistsThenReturnsItsValue) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    auto val = tree.get(bytes("k1"));
+    ASSERT_TRUE(val.has_value());
+    EXPECT_EQ(str(*val), "v1");
+}
+
+TEST(BTreeGet, WhenKeyDoesNotExistThenReturnsNullopt) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    EXPECT_FALSE(tree.get(bytes("missing")).has_value());
+}
+
+TEST(BTreeGet, WhenMultipleKeysExistThenEachIsRetrievable) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k3"), bytes("v3"));
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k2"), bytes("v2"));
+
+    EXPECT_EQ(str(*tree.get(bytes("k1"))), "v1");
+    EXPECT_EQ(str(*tree.get(bytes("k2"))), "v2");
+    EXPECT_EQ(str(*tree.get(bytes("k3"))), "v3");
+}
+
+TEST(BTreeGet, WhenKeyIsUpdatedThenGetReturnsLatestValue) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k1"), bytes("updated"));
+
+    EXPECT_EQ(str(*tree.get(bytes("k1"))), "updated");
+}
+
+TEST(BTreeGet, WhenKeyIsRemovedThenGetReturnsNullopt) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+    ASSERT_TRUE(tree.remove(bytes("k1")));
+
+    EXPECT_FALSE(tree.get(bytes("k1")).has_value());
+}
+
+TEST(BTreeGet, WhenTraversingMultiLevelTreeThenEveryKeyIsFound) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    // Mirrors BTreeInsert.WhenEnoughKeysAreInsertedThenRootSplitsAndTreeGrowsALevel:
+    // enough large values to force the root to split into height 2.
+    const int n = 30;
+    for (int i = 0; i < n; ++i) {
+        tree.insert(indexed_key(static_cast<uint32_t>(i), 100), std::vector<uint8_t>(100, 'v'));
+    }
+    ASSERT_EQ(pages.get(tree.root).btype(), BNODE_NODE);
+
+    for (int i = 0; i < n; ++i) {
+        auto val = tree.get(indexed_key(static_cast<uint32_t>(i), 100));
+        ASSERT_TRUE(val.has_value()) << "missing key " << i;
+        EXPECT_EQ(val->size(), 100u);
+    }
+    EXPECT_FALSE(tree.get(indexed_key(static_cast<uint32_t>(n), 100)).has_value());
+}
+
+TEST(BTreeGet, WhenKeyIsEmptyThenGetThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    EXPECT_THROW(tree.get({}), std::invalid_argument);
+}
+
+TEST(BTreeGet, WhenKeyExceedsMaxSizeThenGetThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    std::vector<uint8_t> big_key(BTREE_MAX_KEY_SIZE + 1, 'x');
+    EXPECT_THROW(tree.get(big_key), std::invalid_argument);
+}
+
+// ============================================================================
 // BTree::remove: high-level KV interface
 // ============================================================================
 TEST(BTreeRemove, WhenTreeIsEmptyThenRemoveReturnsFalse) {
@@ -1306,7 +1373,7 @@ TEST(BTreeRemove, WhenKeyIsRemovedThenItIsNoLongerRetrievable) {
     tree.insert(bytes("k1"), bytes("v1"));
 
     EXPECT_TRUE(tree.remove(bytes("k1")));
-    EXPECT_FALSE(btree_get(tree, bytes("k1")).has_value());
+    EXPECT_FALSE(tree.get(bytes("k1")).has_value());
 }
 
 TEST(BTreeRemove, WhenKeyDoesNotExistThenRemoveReturnsFalse) {
@@ -1315,7 +1382,7 @@ TEST(BTreeRemove, WhenKeyDoesNotExistThenRemoveReturnsFalse) {
     tree.insert(bytes("k1"), bytes("v1"));
 
     EXPECT_FALSE(tree.remove(bytes("missing")));
-    EXPECT_TRUE(btree_get(tree, bytes("k1")).has_value());
+    EXPECT_TRUE(tree.get(bytes("k1")).has_value());
 }
 
 TEST(BTreeRemove, WhenOneOfMultipleKeysIsRemovedThenOthersRemainRetrievable) {
@@ -1327,9 +1394,9 @@ TEST(BTreeRemove, WhenOneOfMultipleKeysIsRemovedThenOthersRemainRetrievable) {
 
     EXPECT_TRUE(tree.remove(bytes("k2")));
 
-    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "v1");
-    EXPECT_FALSE(btree_get(tree, bytes("k2")).has_value());
-    EXPECT_EQ(str(*btree_get(tree, bytes("k3"))), "v3");
+    EXPECT_EQ(str(*tree.get(bytes("k1"))), "v1");
+    EXPECT_FALSE(tree.get(bytes("k2")).has_value());
+    EXPECT_EQ(str(*tree.get(bytes("k3"))), "v3");
 }
 
 TEST(BTreeRemove, WhenRemovingAllKeysThenOnlyTheSentinelRemains) {
@@ -1341,8 +1408,8 @@ TEST(BTreeRemove, WhenRemovingAllKeysThenOnlyTheSentinelRemains) {
     EXPECT_TRUE(tree.remove(bytes("k1")));
     EXPECT_TRUE(tree.remove(bytes("k2")));
 
-    EXPECT_FALSE(btree_get(tree, bytes("k1")).has_value());
-    EXPECT_FALSE(btree_get(tree, bytes("k2")).has_value());
+    EXPECT_FALSE(tree.get(bytes("k1")).has_value());
+    EXPECT_FALSE(tree.get(bytes("k2")).has_value());
 
     BNode root = pages.get(tree.root);
     EXPECT_EQ(root.btype(), BNODE_LEAF);
@@ -1365,7 +1432,7 @@ TEST(BTreeRemove, WhenRemovingKeysAfterRootSplitThenTreeHeightCanShrinkBack) {
         ASSERT_TRUE(tree.remove(indexed_key(static_cast<uint32_t>(i), 100))) << "missing key " << i;
     }
     for (int i = 0; i < n; ++i) {
-        EXPECT_FALSE(btree_get(tree, indexed_key(static_cast<uint32_t>(i), 100)).has_value());
+        EXPECT_FALSE(tree.get(indexed_key(static_cast<uint32_t>(i), 100)).has_value());
     }
 
     BNode root = pages.get(tree.root);
@@ -1433,6 +1500,10 @@ namespace {
             for (size_t i = 1; i < collected.size(); ++i, ++ref_it) {
                 EXPECT_EQ(collected[i].first, ref_it->first);
                 EXPECT_EQ(collected[i].second, ref_it->second);
+
+                auto val = tree.get(ref_it->first);
+                ASSERT_TRUE(val.has_value()) << "get() should find every key in ref";
+                EXPECT_EQ(*val, ref_it->second);
             }
         }
 
