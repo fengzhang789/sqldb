@@ -1,0 +1,11 @@
+# CMake build directories
+build/
+bin/
+out/
+
+# CMake cache and generated files (in case in-tree builds occur)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
