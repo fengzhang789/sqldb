@@ -674,6 +674,144 @@ TEST(NodeSplitIfNeeded, WhenNodeExceedsPageSizeThenReturnsSplitPair) {
 }
 
 // ============================================================================
+// leaf_delete
+// ============================================================================
+TEST(LeafDelete, WhenDeletingMiddleKeyThenRemainingKeysShift) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 3);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+    old.node_append_kv(2, 0, bytes("k3"), bytes("v3"));
+
+    BNode new_node;
+    leaf_delete(new_node, old, 1);
+
+    EXPECT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+    EXPECT_EQ(str(new_node.get_key(1)), "k3");
+}
+
+TEST(LeafDelete, WhenDeletingFirstKeyThenOnlyLaterKeysRemain) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode new_node;
+    leaf_delete(new_node, old, 0);
+
+    EXPECT_EQ(new_node.nkeys(), 1);
+    EXPECT_EQ(str(new_node.get_key(0)), "k2");
+}
+
+TEST(LeafDelete, WhenDeletingLastKeyThenOnlyPrecedingKeysRemain) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 2);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    old.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode new_node;
+    leaf_delete(new_node, old, 1);
+
+    EXPECT_EQ(new_node.nkeys(), 1);
+    EXPECT_EQ(str(new_node.get_key(0)), "k1");
+}
+
+TEST(LeafDelete, WhenDeletingOnlyKeyThenResultIsEmpty) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 1);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+
+    BNode new_node;
+    leaf_delete(new_node, old, 0);
+
+    EXPECT_EQ(new_node.nkeys(), 0);
+}
+
+// ============================================================================
+// node_merge
+// ============================================================================
+TEST(NodeMerge, WhenMergingTwoLeafNodesThenAllKeysArePreservedInOrder) {
+    BNode left;
+    left.set_header(BNODE_LEAF, 2);
+    left.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    left.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+
+    BNode right;
+    right.set_header(BNODE_LEAF, 2);
+    right.node_append_kv(0, 0, bytes("k3"), bytes("v3"));
+    right.node_append_kv(1, 0, bytes("k4"), bytes("v4"));
+
+    BNode merged;
+    node_merge(merged, left, right);
+
+    ASSERT_EQ(merged.nkeys(), 4);
+    EXPECT_EQ(merged.btype(), BNODE_LEAF);
+    EXPECT_EQ(str(merged.get_key(0)), "k1");
+    EXPECT_EQ(str(merged.get_key(1)), "k2");
+    EXPECT_EQ(str(merged.get_key(2)), "k3");
+    EXPECT_EQ(str(merged.get_key(3)), "k4");
+    EXPECT_EQ(str(merged.get_val(3)), "v4");
+}
+
+TEST(NodeMerge, WhenMergingInternalNodesThenChildPointersArePreserved) {
+    BNode left(BTREE_PAGE_SIZE);
+    left.set_header(BNODE_NODE, 1);
+    left.node_append_kv(0, 100, bytes("a"), {});
+
+    BNode right(BTREE_PAGE_SIZE);
+    right.set_header(BNODE_NODE, 1);
+    right.node_append_kv(0, 200, bytes("m"), {});
+
+    BNode merged;
+    node_merge(merged, left, right);
+
+    ASSERT_EQ(merged.nkeys(), 2);
+    EXPECT_EQ(merged.btype(), BNODE_NODE);
+    EXPECT_EQ(merged.get_ptr(0), 100u);
+    EXPECT_EQ(str(merged.get_key(0)), "a");
+    EXPECT_EQ(merged.get_ptr(1), 200u);
+    EXPECT_EQ(str(merged.get_key(1)), "m");
+}
+
+// ============================================================================
+// node_replace_2_child
+// ============================================================================
+TEST(NodeReplace2Child, WhenReplacingTwoAdjacentChildrenThenSingleLinkReplacesThem) {
+    BNode old(BTREE_PAGE_SIZE);
+    old.set_header(BNODE_NODE, 3);
+    old.node_append_kv(0, 10, bytes("a"), {});
+    old.node_append_kv(1, 20, bytes("m"), {});
+    old.node_append_kv(2, 30, bytes("z"), {});
+
+    BNode new_node;
+    node_replace_2_child(new_node, old, 0, 99, bytes("a"));
+
+    ASSERT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(new_node.get_ptr(0), 99u);
+    EXPECT_EQ(str(new_node.get_key(0)), "a");
+    EXPECT_EQ(new_node.get_ptr(1), 30u);
+    EXPECT_EQ(str(new_node.get_key(1)), "z");
+}
+
+TEST(NodeReplace2Child, WhenReplacingAtEndThenPrecedingChildrenAreUnchanged) {
+    BNode old(BTREE_PAGE_SIZE);
+    old.set_header(BNODE_NODE, 3);
+    old.node_append_kv(0, 10, bytes("a"), {});
+    old.node_append_kv(1, 20, bytes("m"), {});
+    old.node_append_kv(2, 30, bytes("z"), {});
+
+    BNode new_node;
+    node_replace_2_child(new_node, old, 1, 99, bytes("m"));
+
+    ASSERT_EQ(new_node.nkeys(), 2);
+    EXPECT_EQ(new_node.get_ptr(0), 10u);
+    EXPECT_EQ(str(new_node.get_key(0)), "a");
+    EXPECT_EQ(new_node.get_ptr(1), 99u);
+    EXPECT_EQ(str(new_node.get_key(1)), "m");
+}
+
+// ============================================================================
 // tree_insert: leaf nodes
 // ============================================================================
 TEST(TreeInsert, WhenKeyIsNewThenLeafGrowsWithKeyInSortedPosition) {
@@ -801,6 +939,118 @@ TEST(TreeInsert, WhenChildOverflowsThenItSplitsAndParentGrowsByOneKey) {
 
     EXPECT_EQ(result.get_ptr(2), ptr1);
     EXPECT_EQ(result.get_key(2), child1.get_key(0));
+}
+
+// ============================================================================
+// should_merge
+// ============================================================================
+TEST(ShouldMerge, WhenUpdatedNodeIsLargeThenNoMergeIsSuggested) {
+    InMemoryPageManager pages;
+    BNode sibling = make_leaf(1000, 3, 20, 20);
+    uint64_t ptr = pages.new_page(sibling);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, 1, bytes("a"), {});
+    parent.node_append_kv(1, ptr, sibling.get_key(0), {});
+
+    // Large enough on its own (>1/4 page) that a merge should never be
+    // suggested, regardless of siblings.
+    BNode updated = build_leaf(std::vector<std::pair<size_t, size_t>>(12, {100, 100}));
+    ASSERT_GT(updated.nbytes(), BTREE_PAGE_SIZE / 4);
+
+    BTree tree{0, &pages};
+    auto [direction, merge_sibling] = should_merge(tree, parent, 0, updated);
+
+    EXPECT_EQ(direction, MergeDirection::None);
+}
+
+TEST(ShouldMerge, WhenLeftSiblingFitsThenMergeWithLeftIsSuggested) {
+    InMemoryPageManager pages;
+    BNode left_sibling = make_leaf(0, 1, 10, 10);
+    BNode right_sibling = make_leaf(1000, 1, 10, 10);
+    uint64_t left_ptr = pages.new_page(left_sibling);
+    uint64_t right_ptr = pages.new_page(right_sibling);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, left_ptr, left_sibling.get_key(0), {});
+    parent.node_append_kv(1, right_ptr, right_sibling.get_key(0), {});
+
+    BNode updated = make_leaf(500, 1, 10, 10);
+    ASSERT_LE(updated.nbytes(), BTREE_PAGE_SIZE / 4);
+
+    BTree tree{0, &pages};
+    auto [direction, merge_sibling] = should_merge(tree, parent, 1, updated);
+
+    EXPECT_EQ(direction, MergeDirection::Left);
+    EXPECT_EQ(merge_sibling.nkeys(), left_sibling.nkeys());
+    EXPECT_EQ(merge_sibling.get_key(0), left_sibling.get_key(0));
+}
+
+TEST(ShouldMerge, WhenRightSiblingFitsThenMergeWithRightIsSuggested) {
+    InMemoryPageManager pages;
+    BNode right_sibling = make_leaf(1000, 1, 10, 10);
+    uint64_t right_ptr = pages.new_page(right_sibling);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, 1, bytes("a"), {});
+    parent.node_append_kv(1, right_ptr, right_sibling.get_key(0), {});
+
+    BNode updated = make_leaf(0, 1, 10, 10);
+    ASSERT_LE(updated.nbytes(), BTREE_PAGE_SIZE / 4);
+
+    BTree tree{0, &pages};
+    // idx = 0: no left sibling, so should fall through to the right one.
+    auto [direction, merge_sibling] = should_merge(tree, parent, 0, updated);
+
+    EXPECT_EQ(direction, MergeDirection::Right);
+    EXPECT_EQ(merge_sibling.nkeys(), right_sibling.nkeys());
+    EXPECT_EQ(merge_sibling.get_key(0), right_sibling.get_key(0));
+}
+
+TEST(ShouldMerge, WhenNoSiblingsExistThenNoMergeIsSuggested) {
+    InMemoryPageManager pages;
+    BNode updated = make_leaf(0, 1, 10, 10);
+    ASSERT_LE(updated.nbytes(), BTREE_PAGE_SIZE / 4);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 1);
+    parent.node_append_kv(0, 1, bytes("a"), {});
+
+    BTree tree{0, &pages};
+    auto [direction, merge_sibling] = should_merge(tree, parent, 0, updated);
+
+    EXPECT_EQ(direction, MergeDirection::None);
+}
+
+TEST(ShouldMerge, WhenLeftSiblingIsTooLargeThenRightSiblingIsConsideredInstead) {
+    InMemoryPageManager pages;
+    // Left sibling is nearly a full page on its own, so merging it with
+    // `updated` would overflow a page; the small right sibling still fits.
+    BNode left_sibling = make_leaf(0, 19, 100, 100);
+    BNode right_sibling = make_leaf(1000, 1, 10, 10);
+    uint64_t left_ptr = pages.new_page(left_sibling);
+    uint64_t right_ptr = pages.new_page(right_sibling);
+
+    // 3 children so idx=1 has both a left (idx0) and a right (idx2) sibling
+    // to consider.
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 3);
+    parent.node_append_kv(0, left_ptr, left_sibling.get_key(0), {});
+    parent.node_append_kv(1, 999, bytes("mid"), {}); // placeholder; not fetched by should_merge
+    parent.node_append_kv(2, right_ptr, right_sibling.get_key(0), {});
+
+    BNode updated = make_leaf(500, 1, 10, 10);
+    ASSERT_LE(updated.nbytes(), BTREE_PAGE_SIZE / 4);
+    ASSERT_GT(static_cast<uint32_t>(left_sibling.nbytes()) + updated.nbytes(), BTREE_PAGE_SIZE);
+
+    BTree tree{0, &pages};
+    auto [direction, merge_sibling] = should_merge(tree, parent, 1, updated);
+
+    EXPECT_EQ(direction, MergeDirection::Right);
+    EXPECT_EQ(merge_sibling.get_key(0), right_sibling.get_key(0));
 }
 
 // ============================================================================

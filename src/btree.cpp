@@ -223,6 +223,31 @@ void leaf_update(
     node_append_range(new_node, old, idx + 1, idx + 1, old.nkeys() - (idx + 1));
 }
 
+void leaf_delete(BNode& new_node, const BNode& old, uint16_t idx) {
+    new_node.set_header(BNODE_LEAF, old.nkeys() - 1);
+    node_append_range(new_node, old, 0, 0, idx);
+    node_append_range(new_node, old, idx, idx + 1, old.nkeys() - (idx + 1));
+}
+
+// ============================================================================
+// Merge
+// ============================================================================
+void node_merge(BNode& new_node, const BNode& left, const BNode& right) {
+    new_node.set_header(left.btype(), left.nkeys() + right.nkeys());
+    node_append_range(new_node, left, 0, 0, left.nkeys());
+    node_append_range(new_node, right, left.nkeys(), 0, right.nkeys());
+}
+
+void node_replace_2_child(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    uint64_t ptr, const std::vector<uint8_t>& key
+) {
+    new_node.set_header(BNODE_NODE, old.nkeys() - 1);
+    node_append_range(new_node, old, 0, 0, idx);
+    new_node.node_append_kv(idx, ptr, key, {});
+    node_append_range(new_node, old, idx + 1, idx + 2, old.nkeys() - (idx + 2));
+}
+
 // ============================================================================
 // Lookup
 // ============================================================================
@@ -343,6 +368,32 @@ void node_replace_child_n(
         new_node.node_append_kv(idx + i, tree.pages->new_page(children[i]), children[i].get_key(0), {});
     }
     node_append_range(new_node, old, idx + inc, idx + 1, old.nkeys() - (idx + 1));
+}
+
+// ============================================================================
+// Merge conditions
+// ============================================================================
+std::pair<MergeDirection, BNode> should_merge(
+    const BTree& tree, const BNode& node, uint16_t idx, const BNode& updated
+) {
+    if (updated.nbytes() > BTREE_PAGE_SIZE / 4) {
+        return {MergeDirection::None, BNode()};
+    }
+    if (idx > 0) {
+        BNode sibling = tree.pages->get(node.get_ptr(idx - 1));
+        uint32_t merged = static_cast<uint32_t>(sibling.nbytes()) + updated.nbytes() - BNode::ptrs_offset();
+        if (merged <= BTREE_PAGE_SIZE) {
+            return {MergeDirection::Left, sibling};
+        }
+    }
+    if (idx + 1 < node.nkeys()) {
+        BNode sibling = tree.pages->get(node.get_ptr(idx + 1));
+        uint32_t merged = static_cast<uint32_t>(sibling.nbytes()) + updated.nbytes() - BNode::ptrs_offset();
+        if (merged <= BTREE_PAGE_SIZE) {
+            return {MergeDirection::Right, sibling};
+        }
+    }
+    return {MergeDirection::None, BNode()};
 }
 
 // ============================================================================

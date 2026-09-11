@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstddef>
+#include <utility>
 
 // Constants
 constexpr uint16_t BNODE_NODE = 1; // Internal node with child page pointers
@@ -98,6 +99,19 @@ void leaf_update(
 // Returns -1 if all keys are greater than `key`.
 int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key);
 
+// Build `new_node` as a copy of `old` with the KV pair at idx removed.
+void leaf_delete(BNode& new_node, const BNode& old, uint16_t idx);
+
+// Merge `left` and `right` into `new_node`, in that order.
+void node_merge(BNode& new_node, const BNode& left, const BNode& right);
+
+// Build `new_node` as a copy of `old` with the 2 adjacent child links at
+// idx and idx+1 replaced by a single link (ptr, key).
+void node_replace_2_child(
+    BNode& new_node, const BNode& old, uint16_t idx,
+    uint64_t ptr, const std::vector<uint8_t>& key
+);
+
 // Split an oversized node into 2 nodes, each of which fits within
 // BTREE_PAGE_SIZE. Requires old.nkeys() >= 2.
 void node_split(BNode& left, BNode& right, const BNode& old);
@@ -142,4 +156,20 @@ void node_insert(
 void node_replace_child_n(
     const BTree& tree, BNode& new_node, const BNode& old, uint16_t idx,
     const std::vector<BNode>& children
+);
+
+enum class MergeDirection {
+    None,   // no merge
+    Left,   // merge with the left sibling
+    Right,  // merge with the right sibling
+};
+
+// Should `updated` (the post-update replacement for node's child at idx) be
+// merged with a sibling? Returns {MergeDirection::Left, left sibling},
+// {MergeDirection::Right, right sibling}, or {MergeDirection::None, BNode{}}
+// if no merge should happen. A soft threshold (1/4 page) is used instead of
+// requiring an empty node, so merges happen earlier and mostly empty trees
+// don't retain a large number of nodes.
+std::pair<MergeDirection, BNode> should_merge(
+    const BTree& tree, const BNode& node, uint16_t idx, const BNode& updated
 );
