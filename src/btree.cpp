@@ -154,6 +154,8 @@ void BNode::node_append_kv(uint16_t idx, uint64_t ptr, const std::vector<uint8_t
     uint16_t klen = static_cast<uint16_t>(key.size());
     uint16_t vlen = static_cast<uint16_t>(val.size());
 
+    assert(key.size() <= BTREE_MAX_KEY_SIZE);
+    assert(val.size() <= BTREE_MAX_VAL_SIZE);
     assert(pos + 4 + klen + vlen <= size());
 
     // 4-byte KV sizes and KV data
@@ -240,5 +242,42 @@ int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key) {
         }
     }
     return result;
+}
+
+// ============================================================================
+// Split
+// ============================================================================
+// Splits an oversized `old` node into `left` and `right`. `left`/`right` must
+// each have capacity >= BTREE_PAGE_SIZE. A 3rd node is never needed, since
+// BTREE_MAX_KEY_SIZE/BTREE_MAX_VAL_SIZE keep every KV entry within half a
+// page (see the static_assert in btree.h).
+void node_split(BNode& left, BNode& right, const BNode& old) {
+    assert(old.nkeys() >= 2);
+
+    uint16_t nleft = old.nkeys() / 2;
+
+    uint16_t left_bytes = static_cast<uint16_t>(4 + 8 * nleft + 2 * nleft + old.get_offset(nleft));
+    while (left_bytes > BTREE_PAGE_SIZE) {
+        --nleft;
+        left_bytes = static_cast<uint16_t>(4 + 8 * nleft + 2 * nleft + old.get_offset(nleft));
+    }
+    assert(nleft >= 1);
+
+    uint16_t right_bytes = static_cast<uint16_t>(old.nbytes() - left_bytes + 4);
+    while (right_bytes > BTREE_PAGE_SIZE) {
+        ++nleft;
+        left_bytes = static_cast<uint16_t>(4 + 8 * nleft + 2 * nleft + old.get_offset(nleft));
+        right_bytes = static_cast<uint16_t>(old.nbytes() - left_bytes + 4);
+    }
+    assert(nleft < old.nkeys());
+    uint16_t nright = old.nkeys() - nleft;
+
+    left.set_header(old.btype(), nleft);
+    right.set_header(old.btype(), nright);
+    node_append_range(left, old, 0, 0, nleft);
+    node_append_range(right, old, 0, nleft, nright);
+
+    assert(left.nbytes() <= BTREE_PAGE_SIZE);
+    assert(right.nbytes() <= BTREE_PAGE_SIZE);
 }
 

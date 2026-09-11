@@ -492,3 +492,155 @@ TEST(LeafInsertOrUpdate, WhenKeyDoesNotExistThenInsertPath) {
     EXPECT_EQ(str(new_node.get_key(2)), "k3");
 }
 
+// ============================================================================
+// node_split
+// ============================================================================
+namespace {
+    // A key that sorts by `idx`: a 4-byte big-endian index prefix followed by
+    // filler bytes out to `len` total (len must be >= 4).
+    std::vector<uint8_t> indexed_key(uint32_t idx, size_t len) {
+        std::vector<uint8_t> k(len, 'x');
+        k[0] = static_cast<uint8_t>(idx >> 24);
+        k[1] = static_cast<uint8_t>(idx >> 16);
+        k[2] = static_cast<uint8_t>(idx >> 8);
+        k[3] = static_cast<uint8_t>(idx);
+        return k;
+    }
+
+    // Builds a leaf BNode (possibly oversized) from a list of (key_len,
+    // val_len) entry sizes. Keys are assigned in sorted order via
+    // indexed_key, so ordering invariants hold.
+    BNode build_leaf(const std::vector<std::pair<size_t, size_t>>& entries) {
+        size_t n = entries.size();
+        size_t used = 4 + n * 10;
+        for (const auto& [klen, vlen] : entries) {
+            used += 4 + klen + vlen;
+        }
+
+        BNode node(used); // exactly large enough to hold the oversized node
+        node.set_header(BNODE_LEAF, static_cast<uint16_t>(n));
+        for (uint16_t i = 0; i < n; ++i) {
+            auto [klen, vlen] = entries[i];
+            node.node_append_kv(i, 0, indexed_key(i, klen), std::vector<uint8_t>(vlen, 'v'));
+        }
+        return node;
+    }
+
+    // Checks the invariants node_split must always uphold: both halves fit
+    // within a page, together they contain exactly old's keys, and the
+    // relative order (and ptrs) are preserved.
+    void expect_valid_split(const BNode& old, const BNode& left, const BNode& right) {
+        EXPECT_LE(left.nbytes(), BTREE_PAGE_SIZE);
+        EXPECT_LE(right.nbytes(), BTREE_PAGE_SIZE);
+        ASSERT_GE(left.nkeys(), 1);
+        ASSERT_GE(right.nkeys(), 1);
+        ASSERT_EQ(static_cast<uint32_t>(left.nkeys()) + right.nkeys(), old.nkeys());
+
+        for (uint16_t i = 0; i < left.nkeys(); ++i) {
+            EXPECT_EQ(left.get_key(i), old.get_key(i));
+            EXPECT_EQ(left.get_val(i), old.get_val(i));
+            EXPECT_EQ(left.get_ptr(i), old.get_ptr(i));
+        }
+        for (uint16_t i = 0; i < right.nkeys(); ++i) {
+            uint16_t old_idx = static_cast<uint16_t>(left.nkeys() + i);
+            EXPECT_EQ(right.get_key(i), old.get_key(old_idx));
+            EXPECT_EQ(right.get_val(i), old.get_val(old_idx));
+            EXPECT_EQ(right.get_ptr(i), old.get_ptr(old_idx));
+        }
+    }
+}
+
+TEST(NodeSplit, WhenEntriesAreUniformThenBothHalvesFitAndKeysArePreserved) {
+    // 20 entries of 204 bytes each overflow a single page (~4284 bytes).
+    BNode old = build_leaf(std::vector<std::pair<size_t, size_t>>(20, {100, 100}));
+    ASSERT_GT(old.nbytes(), BTREE_PAGE_SIZE);
+
+    BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
+    node_split(left, right, old);
+
+    expect_valid_split(old, left, right);
+    EXPECT_EQ(left.nkeys(), 10);
+    EXPECT_EQ(right.nkeys(), 10);
+}
+
+TEST(NodeSplit, WhenBigKeysClusterOnLeftThenGuessShrinksToFitLeft) {
+    // 3 max-size entries (2014B each) followed by 3 small ones. The naive
+    // half-point guess (nleft=3) includes all 3 big entries and overflows a
+    // page, so node_split must shrink nleft before it fits.
+    BNode old = build_leaf({
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {10, 10},
+        {10, 10},
+        {10, 10},
+    });
+    ASSERT_GT(old.nbytes(), BTREE_PAGE_SIZE);
+
+    BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
+    node_split(left, right, old);
+
+    expect_valid_split(old, left, right);
+    // Guess (3) had to shrink: left ends up with only 2 of the 3 big keys.
+    EXPECT_EQ(left.nkeys(), 2);
+    EXPECT_EQ(right.nkeys(), 4);
+}
+
+TEST(NodeSplit, WhenBigKeysClusterOnRightThenGuessGrowsToFitRight) {
+    // Mirror of the above: 3 small entries followed by 3 max-size ones. The
+    // naive guess (nleft=3) leaves all 3 big entries on the right, which
+    // overflows a page, so node_split must grow nleft to absorb one of them.
+    BNode old = build_leaf({
+        {10, 10},
+        {10, 10},
+        {10, 10},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+    });
+    ASSERT_GT(old.nbytes(), BTREE_PAGE_SIZE);
+
+    BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
+    node_split(left, right, old);
+
+    expect_valid_split(old, left, right);
+    // Guess (3) had to grow: left absorbs 1 of the 3 big keys, leaving only
+    // 2 (which is exactly the max that fit in one page together) on the right.
+    EXPECT_EQ(left.nkeys(), 4);
+    EXPECT_EQ(right.nkeys(), 2);
+}
+
+TEST(NodeSplit, WhenTwoMaxSizeEntriesThenTheyJustFitOnePageTogether) {
+    BNode node = build_leaf({
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+        {BTREE_MAX_KEY_SIZE, BTREE_MAX_VAL_SIZE},
+    });
+    EXPECT_LE(node.nbytes(), BTREE_PAGE_SIZE);
+}
+
+TEST(NodeSplit, WhenSplittingInternalNodeThenChildPointersArePreserved) {
+    BNode old(BTREE_PAGE_SIZE * 2);
+    const int n = 30;
+    old.set_header(BNODE_NODE, n);
+    for (int i = 0; i < n; ++i) {
+        old.node_append_kv(static_cast<uint16_t>(i), 1000 + i, indexed_key(i, 150), {});
+    }
+    ASSERT_GT(old.nbytes(), BTREE_PAGE_SIZE);
+
+    BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
+    node_split(left, right, old);
+
+    expect_valid_split(old, left, right);
+    EXPECT_EQ(left.btype(), BNODE_NODE);
+    EXPECT_EQ(right.btype(), BNODE_NODE);
+}
+
+TEST(NodeSplit, WhenOldHasFewerThanTwoKeysThenAsserts) {
+    BNode old;
+    old.set_header(BNODE_LEAF, 1);
+    old.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+
+    BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
+    EXPECT_DEATH(node_split(left, right, old), "");
+}
+

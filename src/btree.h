@@ -8,6 +8,18 @@
 constexpr uint16_t BNODE_NODE = 1; // Internal node with child page pointers
 constexpr uint16_t BNODE_LEAF = 2; // Leaf node with values
 constexpr size_t BTREE_PAGE_SIZE = 4096;
+constexpr size_t BTREE_MAX_KEY_SIZE = 1000;
+constexpr size_t BTREE_MAX_VAL_SIZE = 1000;
+
+// Per-KV overhead: 8B child pointer + 2B offset entry + 2B key length + 2B val length.
+constexpr size_t BNODE_KV_ENTRY_OVERHEAD = 8 + 2 + 2 + 2;
+
+// Every KV entry must fit within half a page, so node_split never needs a 3rd node.
+static_assert(
+    BNODE_KV_ENTRY_OVERHEAD + BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE <= (BTREE_PAGE_SIZE - 4) / 2,
+    "BTREE_MAX_KEY_SIZE + BTREE_MAX_VAL_SIZE must leave every KV entry at most "
+    "half a page, so node_split never needs a 3rd node"
+);
 
 // BNode wraps a single page's worth of bytes (the on-disk B+tree node
 // format) and provides accessors/mutators for its layout: header, child
@@ -85,3 +97,7 @@ void leaf_update(
 // Find the last position whose key is less than or equal to `key`.
 // Returns -1 if all keys are greater than `key`.
 int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key);
+
+// Split an oversized node into 2 nodes, each of which fits within
+// BTREE_PAGE_SIZE. Requires old.nkeys() >= 2.
+void node_split(BNode& left, BNode& right, const BNode& old);
