@@ -7,3 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Process src directory
 add_subdirectory(src)
+
+# Tests (GoogleTest, fetched via CMake)
+enable_testing()
+add_subdirectory(tests)
