@@ -1,6 +1,7 @@
 #include "btree.h"
 
 #include <cstdio>
+#include <unordered_map>
 #include <gtest/gtest.h>
 
 namespace {
@@ -642,5 +643,161 @@ TEST(NodeSplit, WhenOldHasFewerThanTwoKeysThenAsserts) {
 
     BNode left(BTREE_PAGE_SIZE), right(BTREE_PAGE_SIZE);
     EXPECT_DEATH(node_split(left, right, old), "");
+}
+
+// ============================================================================
+// node_split_if_needed
+// ============================================================================
+TEST(NodeSplitIfNeeded, WhenNodeFitsThenReturnsSingleUnchangedNode) {
+    BNode node;
+    node.set_header(BNODE_LEAF, 2);
+    node.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    node.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    std::vector<BNode> result = node_split_if_needed(node);
+
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].nkeys(), 2);
+    EXPECT_EQ(str(result[0].get_key(1)), "k3");
+}
+
+TEST(NodeSplitIfNeeded, WhenNodeExceedsPageSizeThenReturnsSplitPair) {
+    BNode old = build_leaf(std::vector<std::pair<size_t, size_t>>(20, {100, 100}));
+    ASSERT_GT(old.nbytes(), BTREE_PAGE_SIZE);
+
+    std::vector<BNode> result = node_split_if_needed(old);
+
+    ASSERT_EQ(result.size(), 2u);
+    expect_valid_split(old, result[0], result[1]);
+}
+
+// ============================================================================
+// tree_insert: leaf nodes
+// ============================================================================
+TEST(TreeInsert, WhenKeyIsNewThenLeafGrowsWithKeyInSortedPosition) {
+    BNode leaf;
+    leaf.set_header(BNODE_LEAF, 2);
+    leaf.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    leaf.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    BTree tree;
+    BNode result = tree_insert(tree, leaf, bytes("k2"), bytes("v2"));
+
+    EXPECT_EQ(result.nkeys(), 3);
+    EXPECT_EQ(str(result.get_key(1)), "k2");
+    EXPECT_EQ(str(result.get_val(1)), "v2");
+}
+
+TEST(TreeInsert, WhenKeyExistsThenValueIsReplacedInPlace) {
+    BNode leaf;
+    leaf.set_header(BNODE_LEAF, 2);
+    leaf.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    leaf.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    BTree tree;
+    BNode result = tree_insert(tree, leaf, bytes("k3"), bytes("updated"));
+
+    EXPECT_EQ(result.nkeys(), 2);
+    EXPECT_EQ(str(result.get_key(1)), "k3");
+    EXPECT_EQ(str(result.get_val(1)), "updated");
+}
+
+TEST(TreeInsert, WhenInternalNodeFirstKeyExceedsSearchKeyThenAsserts) {
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 1);
+    parent.node_append_kv(0, 1, bytes("k5"), {});
+
+    BTree tree;
+    EXPECT_DEATH(tree_insert(tree, parent, bytes("k1"), bytes("v1")), "");
+}
+
+// ============================================================================
+// tree_insert / node_insert: internal nodes, via an in-memory PageManager
+// ============================================================================
+namespace {
+    class InMemoryPageManager : public PageManager {
+    public:
+        BNode get(uint64_t ptr) const override { return pages_.at(ptr); }
+
+        uint64_t new_page(const BNode& node) override {
+            uint64_t ptr = next_ptr_++;
+            pages_[ptr] = node;
+            return ptr;
+        }
+
+        void del(uint64_t ptr) override { pages_.erase(ptr); }
+
+        bool has_page(uint64_t ptr) const { return pages_.count(ptr) > 0; }
+
+    private:
+        std::unordered_map<uint64_t, BNode> pages_;
+        uint64_t next_ptr_ = 1;
+    };
+
+    BNode make_leaf(uint32_t start_idx, uint16_t count, size_t klen, size_t vlen) {
+        BNode node;
+        node.set_header(BNODE_LEAF, count);
+        for (uint16_t i = 0; i < count; ++i) {
+            node.node_append_kv(i, 0, indexed_key(start_idx + i, klen), std::vector<uint8_t>(vlen, 'v'));
+        }
+        return node;
+    }
+}
+
+TEST(TreeInsert, WhenInsertingIntoInternalNodeThenTargetChildIsUpdated) {
+    InMemoryPageManager pages;
+    BNode child0 = make_leaf(0, 3, 20, 20);
+    BNode child1 = make_leaf(1000, 3, 20, 20);
+    uint64_t ptr0 = pages.new_page(child0);
+    uint64_t ptr1 = pages.new_page(child1);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, ptr0, child0.get_key(0), {});
+    parent.node_append_kv(1, ptr1, child1.get_key(0), {});
+
+    BTree tree{0, &pages};
+    BNode result = tree_insert(tree, parent, indexed_key(1, 20), bytes("updated"));
+
+    ASSERT_EQ(result.nkeys(), 2);
+    EXPECT_FALSE(pages.has_page(ptr0));
+
+    uint64_t new_ptr0 = result.get_ptr(0);
+    EXPECT_NE(new_ptr0, ptr0);
+    BNode new_child0 = pages.get(new_ptr0);
+    EXPECT_EQ(new_child0.nkeys(), 3);
+    EXPECT_EQ(str(new_child0.get_val(1)), "updated");
+
+    EXPECT_EQ(result.get_ptr(1), ptr1);
+    EXPECT_EQ(result.get_key(1), child1.get_key(0));
+}
+
+TEST(TreeInsert, WhenChildOverflowsThenItSplitsAndParentGrowsByOneKey) {
+    InMemoryPageManager pages;
+    BNode child0 = make_leaf(0, 19, 100, 100);
+    BNode child1 = make_leaf(1000, 3, 20, 20);
+    uint64_t ptr0 = pages.new_page(child0);
+    uint64_t ptr1 = pages.new_page(child1);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, ptr0, child0.get_key(0), {});
+    parent.node_append_kv(1, ptr1, child1.get_key(0), {});
+
+    BTree tree{0, &pages};
+    BNode result = tree_insert(tree, parent, indexed_key(19, 100), std::vector<uint8_t>(100, 'v'));
+
+    ASSERT_EQ(result.nkeys(), 3);
+    EXPECT_FALSE(pages.has_page(ptr0));
+
+    BNode split_left = pages.get(result.get_ptr(0));
+    BNode split_right = pages.get(result.get_ptr(1));
+    EXPECT_EQ(split_left.nkeys(), 10);
+    EXPECT_EQ(split_right.nkeys(), 10);
+    EXPECT_EQ(result.get_key(0), child0.get_key(0));
+    EXPECT_EQ(result.get_key(1), split_right.get_key(0));
+
+    EXPECT_EQ(result.get_ptr(2), ptr1);
+    EXPECT_EQ(result.get_key(2), child1.get_key(0));
 }
 

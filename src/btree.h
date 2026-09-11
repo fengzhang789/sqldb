@@ -101,3 +101,45 @@ int64_t node_lookup_le(const BNode& node, const std::vector<uint8_t>& key);
 // Split an oversized node into 2 nodes, each of which fits within
 // BTREE_PAGE_SIZE. Requires old.nkeys() >= 2.
 void node_split(BNode& left, BNode& right, const BNode& old);
+
+// Splits `node` via node_split() if it exceeds BTREE_PAGE_SIZE; otherwise
+// returns it unchanged as the sole element.
+std::vector<BNode> node_split_if_needed(const BNode& node);
+
+// Isolates the B+tree data structure from how pages are actually stored, so
+// the tree can be tested with an in-memory implementation and later backed
+// by a real file/mmap without changing any tree logic.
+struct PageManager {
+    virtual ~PageManager() = default;
+
+    virtual BNode get(uint64_t ptr) const = 0;
+    virtual uint64_t new_page(const BNode& node) = 0;
+    virtual void del(uint64_t ptr) = 0;
+};
+
+struct BTree {
+    uint64_t root = 0;
+    PageManager* pages = nullptr;
+};
+
+// Recursively insert/update (key, val) starting at `node`, returning the new
+// (copy-on-write) node. The result may temporarily exceed BTREE_PAGE_SIZE;
+// callers split it via node_split_if_needed() before persisting it.
+BNode tree_insert(
+    const BTree& tree, const BNode& node,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+);
+
+// Inserts (key, val) into the child of `old` at idx, splitting and
+// replacing its link(s) in `new_node` as needed.
+void node_insert(
+    const BTree& tree, BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+);
+
+// Build `new_node` as a copy of `old` with the single child link at idx
+// replaced by links to `children` (each persisted via tree.pages->new_page()).
+void node_replace_child_n(
+    const BTree& tree, BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<BNode>& children
+);

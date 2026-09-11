@@ -281,3 +281,66 @@ void node_split(BNode& left, BNode& right, const BNode& old) {
     assert(right.nbytes() <= BTREE_PAGE_SIZE);
 }
 
+std::vector<BNode> node_split_if_needed(const BNode& node) {
+    if (node.nbytes() <= BTREE_PAGE_SIZE) {
+        return {node};
+    }
+    BNode left, right;
+    node_split(left, right, node);
+    return {left, right};
+}
+
+// ============================================================================
+// Tree insertion
+// ============================================================================
+BNode tree_insert(
+    const BTree& tree, const BNode& node,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+) {
+    BNode new_node(2 * BTREE_PAGE_SIZE);
+    int64_t idx = node_lookup_le(node, key);
+
+    switch (node.btype()) {
+        case BNODE_LEAF:
+            if (idx >= 0 && node.get_key(static_cast<uint16_t>(idx)) == key) {
+                leaf_update(new_node, node, static_cast<uint16_t>(idx), key, val);
+            } else {
+                leaf_insert(new_node, node, static_cast<uint16_t>(idx + 1), key, val);
+            }
+            break;
+        case BNODE_NODE:
+            assert(idx >= 0);
+            node_insert(tree, new_node, node, static_cast<uint16_t>(idx), key, val);
+            break;
+        default:
+            assert(false && "tree_insert: bad node type");
+    }
+    return new_node;
+}
+
+void node_insert(
+    const BTree& tree, BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<uint8_t>& key, const std::vector<uint8_t>& val
+) {
+    uint64_t child_ptr = old.get_ptr(idx);
+    BNode updated_child = tree_insert(tree, tree.pages->get(child_ptr), key, val);
+
+    std::vector<BNode> split = node_split_if_needed(updated_child);
+    tree.pages->del(child_ptr);
+
+    node_replace_child_n(tree, new_node, old, idx, split);
+}
+
+void node_replace_child_n(
+    const BTree& tree, BNode& new_node, const BNode& old, uint16_t idx,
+    const std::vector<BNode>& children
+) {
+    uint16_t inc = static_cast<uint16_t>(children.size());
+    new_node.set_header(BNODE_NODE, old.nkeys() + inc - 1);
+    node_append_range(new_node, old, 0, 0, idx);
+    for (uint16_t i = 0; i < inc; ++i) {
+        new_node.node_append_kv(idx + i, tree.pages->new_page(children[i]), children[i].get_key(0), {});
+    }
+    node_append_range(new_node, old, idx + inc, idx + 1, old.nkeys() - (idx + 1));
+}
+
