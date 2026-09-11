@@ -397,16 +397,85 @@ std::pair<MergeDirection, BNode> should_merge(
 }
 
 // ============================================================================
+// Tree deletion
+// ============================================================================
+BNode tree_delete(
+    const BTree& tree, const BNode& node, const std::vector<uint8_t>& key
+) {
+    int64_t idx = node_lookup_le(node, key);
+
+    switch (node.btype()) {
+        case BNODE_LEAF:
+            if (idx >= 0 && node.get_key(static_cast<uint16_t>(idx)) == key) {
+                BNode new_node;
+                leaf_delete(new_node, node, static_cast<uint16_t>(idx));
+                return new_node;
+            }
+            return BNode(0); // not found
+        case BNODE_NODE:
+            assert(idx >= 0);
+            return node_delete(tree, node, static_cast<uint16_t>(idx), key);
+        default:
+            assert(false && "tree_delete: bad node type");
+    }
+    return BNode(0);
+}
+
+BNode node_delete(
+    const BTree& tree, const BNode& old, uint16_t idx, const std::vector<uint8_t>& key
+) {
+    uint64_t child_ptr = old.get_ptr(idx);
+    BNode updated = tree_delete(tree, tree.pages->get(child_ptr), key);
+    if (updated.data.empty()) {
+        return BNode(0); // not found
+    }
+    tree.pages->del(child_ptr);
+
+    BNode new_node(BTREE_PAGE_SIZE);
+    auto [merge_dir, sibling] = should_merge(tree, old, idx, updated);
+
+    switch (merge_dir) {
+        case MergeDirection::Left: {
+            BNode merged;
+            node_merge(merged, sibling, updated);
+            tree.pages->del(old.get_ptr(idx - 1));
+            node_replace_2_child(new_node, old, idx - 1, tree.pages->new_page(merged), merged.get_key(0));
+            break;
+        }
+        case MergeDirection::Right: {
+            BNode merged;
+            node_merge(merged, updated, sibling);
+            tree.pages->del(old.get_ptr(idx + 1));
+            node_replace_2_child(new_node, old, idx, tree.pages->new_page(merged), merged.get_key(0));
+            break;
+        }
+        case MergeDirection::None:
+            if (updated.nkeys() == 0) {
+                assert(old.nkeys() == 1 && idx == 0); // 1 empty child but no sibling
+                new_node.set_header(BNODE_NODE, 0);    // the parent becomes empty too
+            } else {
+                node_replace_child_n(tree, new_node, old, idx, {updated});
+            }
+            break;
+    }
+    return new_node;
+}
+
+// ============================================================================
 // BTree Insert
 // ============================================================================
 namespace {
-    void check_limit(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+    void check_key_limit(const std::vector<uint8_t>& key) {
         if (key.empty()) {
             throw std::invalid_argument("empty key");
         }
         if (key.size() > BTREE_MAX_KEY_SIZE) {
             throw std::invalid_argument("key too large");
         }
+    }
+
+    void check_limit(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+        check_key_limit(key);
         if (val.size() > BTREE_MAX_VAL_SIZE) {
             throw std::invalid_argument("value too large");
         }
@@ -442,4 +511,29 @@ void BTree::insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& 
     } else {
         root = pages->new_page(split[0]);
     }
+}
+
+// ============================================================================
+// BTree Delete
+// ============================================================================
+bool BTree::remove(const std::vector<uint8_t>& key) {
+    check_key_limit(key);
+
+    if (root == 0) {
+        return false;
+    }
+
+    BNode updated = tree_delete(*this, pages->get(root), key);
+    if (updated.data.empty()) {
+        return false; // not found
+    }
+    pages->del(root);
+
+    if (updated.btype() == BNODE_NODE && updated.nkeys() == 1) {
+        // The root has only 1 child left: drop this level.
+        root = updated.get_ptr(0);
+    } else {
+        root = pages->new_page(updated);
+    }
+    return true;
 }

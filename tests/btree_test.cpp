@@ -1,7 +1,10 @@
 #include "btree.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <map>
 #include <optional>
+#include <random>
 #include <stdexcept>
 #include <unordered_map>
 #include <gtest/gtest.h>
@@ -852,6 +855,46 @@ TEST(TreeInsert, WhenInternalNodeFirstKeyExceedsSearchKeyThenAsserts) {
 }
 
 // ============================================================================
+// tree_delete: leaf nodes
+// ============================================================================
+TEST(TreeDelete, WhenKeyExistsInLeafThenItIsRemoved) {
+    BNode leaf;
+    leaf.set_header(BNODE_LEAF, 3);
+    leaf.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    leaf.node_append_kv(1, 0, bytes("k2"), bytes("v2"));
+    leaf.node_append_kv(2, 0, bytes("k3"), bytes("v3"));
+
+    BTree tree;
+    BNode result = tree_delete(tree, leaf, bytes("k2"));
+
+    ASSERT_FALSE(result.data.empty());
+    EXPECT_EQ(result.nkeys(), 2);
+    EXPECT_EQ(str(result.get_key(0)), "k1");
+    EXPECT_EQ(str(result.get_key(1)), "k3");
+}
+
+TEST(TreeDelete, WhenKeyDoesNotExistInLeafThenEmptyNodeIsReturned) {
+    BNode leaf;
+    leaf.set_header(BNODE_LEAF, 2);
+    leaf.node_append_kv(0, 0, bytes("k1"), bytes("v1"));
+    leaf.node_append_kv(1, 0, bytes("k3"), bytes("v3"));
+
+    BTree tree;
+    BNode result = tree_delete(tree, leaf, bytes("k2"));
+
+    EXPECT_TRUE(result.data.empty());
+}
+
+TEST(TreeDelete, WhenInternalNodeFirstKeyExceedsSearchKeyThenAsserts) {
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 1);
+    parent.node_append_kv(0, 1, bytes("k5"), {});
+
+    BTree tree;
+    EXPECT_DEATH(tree_delete(tree, parent, bytes("k1")), "");
+}
+
+// ============================================================================
 // tree_insert / node_insert: internal nodes, via an in-memory PageManager
 // ============================================================================
 namespace {
@@ -1054,6 +1097,82 @@ TEST(ShouldMerge, WhenLeftSiblingIsTooLargeThenRightSiblingIsConsideredInstead) 
 }
 
 // ============================================================================
+// tree_delete / node_delete: internal nodes, via an in-memory PageManager
+// ============================================================================
+TEST(NodeDelete, WhenDeletingFromInternalNodeThenTargetChildIsUpdatedWithoutMerging) {
+    InMemoryPageManager pages;
+    // child0 stays well above the 1/4-page merge threshold even after losing
+    // one entry, so should_merge must never even be triggered.
+    BNode child0 = make_leaf(0, 19, 100, 100);
+    BNode child1 = make_leaf(1000, 3, 20, 20);
+    uint64_t ptr0 = pages.new_page(child0);
+    uint64_t ptr1 = pages.new_page(child1);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, ptr0, child0.get_key(0), {});
+    parent.node_append_kv(1, ptr1, child1.get_key(0), {});
+
+    BTree tree{0, &pages};
+    BNode result = node_delete(tree, parent, 0, child0.get_key(5));
+
+    ASSERT_FALSE(result.data.empty());
+    ASSERT_EQ(result.nkeys(), 2); // no merge happened
+    EXPECT_FALSE(pages.has_page(ptr0));
+
+    BNode new_child0 = pages.get(result.get_ptr(0));
+    EXPECT_EQ(new_child0.nkeys(), 18);
+    EXPECT_EQ(result.get_ptr(1), ptr1); // sibling untouched
+    EXPECT_EQ(result.get_key(1), child1.get_key(0));
+}
+
+TEST(NodeDelete, WhenChildBecomesSmallThenItMergesWithSiblingAndParentShrinks) {
+    InMemoryPageManager pages;
+    BNode child0 = make_leaf(0, 2, 10, 10);
+    BNode child1 = make_leaf(1000, 2, 10, 10);
+    uint64_t ptr0 = pages.new_page(child0);
+    uint64_t ptr1 = pages.new_page(child1);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, ptr0, child0.get_key(0), {});
+    parent.node_append_kv(1, ptr1, child1.get_key(0), {});
+
+    BTree tree{0, &pages};
+    BNode result = node_delete(tree, parent, 0, child0.get_key(1));
+
+    ASSERT_FALSE(result.data.empty());
+    ASSERT_EQ(result.nkeys(), 1); // the 2 children merged into 1
+    EXPECT_FALSE(pages.has_page(ptr0));
+    EXPECT_FALSE(pages.has_page(ptr1));
+
+    BNode merged = pages.get(result.get_ptr(0));
+    ASSERT_EQ(merged.nkeys(), 3);
+    EXPECT_EQ(merged.get_key(0), child0.get_key(0));
+    EXPECT_EQ(merged.get_key(1), child1.get_key(0));
+    EXPECT_EQ(merged.get_key(2), child1.get_key(1));
+}
+
+TEST(NodeDelete, WhenKeyNotFoundInChildSubtreeThenEmptyNodeIsReturned) {
+    InMemoryPageManager pages;
+    BNode child0 = make_leaf(0, 3, 20, 20);
+    BNode child1 = make_leaf(1000, 3, 20, 20);
+    uint64_t ptr0 = pages.new_page(child0);
+    uint64_t ptr1 = pages.new_page(child1);
+
+    BNode parent(BTREE_PAGE_SIZE);
+    parent.set_header(BNODE_NODE, 2);
+    parent.node_append_kv(0, ptr0, child0.get_key(0), {});
+    parent.node_append_kv(1, ptr1, child1.get_key(0), {});
+
+    BTree tree{0, &pages};
+    BNode result = node_delete(tree, parent, 0, indexed_key(999, 20));
+
+    EXPECT_TRUE(result.data.empty());
+    EXPECT_TRUE(pages.has_page(ptr0)); // untouched since the key wasn't found
+}
+
+// ============================================================================
 // BTree::insert: high-level KV interface
 // ============================================================================
 namespace {
@@ -1169,4 +1288,242 @@ TEST(BTreeInsert, WhenValExceedsMaxSizeThenInsertThrows) {
     BTree tree{0, &pages};
     std::vector<uint8_t> big_val(BTREE_MAX_VAL_SIZE + 1, 'x');
     EXPECT_THROW(tree.insert(bytes("k1"), big_val), std::invalid_argument);
+}
+
+// ============================================================================
+// BTree::remove: high-level KV interface
+// ============================================================================
+TEST(BTreeRemove, WhenTreeIsEmptyThenRemoveReturnsFalse) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    EXPECT_FALSE(tree.remove(bytes("k1")));
+}
+
+TEST(BTreeRemove, WhenKeyIsRemovedThenItIsNoLongerRetrievable) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    EXPECT_TRUE(tree.remove(bytes("k1")));
+    EXPECT_FALSE(btree_get(tree, bytes("k1")).has_value());
+}
+
+TEST(BTreeRemove, WhenKeyDoesNotExistThenRemoveReturnsFalse) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+
+    EXPECT_FALSE(tree.remove(bytes("missing")));
+    EXPECT_TRUE(btree_get(tree, bytes("k1")).has_value());
+}
+
+TEST(BTreeRemove, WhenOneOfMultipleKeysIsRemovedThenOthersRemainRetrievable) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k2"), bytes("v2"));
+    tree.insert(bytes("k3"), bytes("v3"));
+
+    EXPECT_TRUE(tree.remove(bytes("k2")));
+
+    EXPECT_EQ(str(*btree_get(tree, bytes("k1"))), "v1");
+    EXPECT_FALSE(btree_get(tree, bytes("k2")).has_value());
+    EXPECT_EQ(str(*btree_get(tree, bytes("k3"))), "v3");
+}
+
+TEST(BTreeRemove, WhenRemovingAllKeysThenOnlyTheSentinelRemains) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    tree.insert(bytes("k1"), bytes("v1"));
+    tree.insert(bytes("k2"), bytes("v2"));
+
+    EXPECT_TRUE(tree.remove(bytes("k1")));
+    EXPECT_TRUE(tree.remove(bytes("k2")));
+
+    EXPECT_FALSE(btree_get(tree, bytes("k1")).has_value());
+    EXPECT_FALSE(btree_get(tree, bytes("k2")).has_value());
+
+    BNode root = pages.get(tree.root);
+    EXPECT_EQ(root.btype(), BNODE_LEAF);
+    EXPECT_EQ(root.nkeys(), 1); // only the empty sentinel key remains
+}
+
+TEST(BTreeRemove, WhenRemovingKeysAfterRootSplitThenTreeHeightCanShrinkBack) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+
+    // Mirrors BTreeInsert.WhenEnoughKeysAreInsertedThenRootSplitsAndTreeGrowsALevel:
+    // enough large values to force the root to split into height 2.
+    const int n = 30;
+    for (int i = 0; i < n; ++i) {
+        tree.insert(indexed_key(static_cast<uint32_t>(i), 100), std::vector<uint8_t>(100, 'v'));
+    }
+    ASSERT_EQ(pages.get(tree.root).btype(), BNODE_NODE);
+
+    for (int i = 0; i < n; ++i) {
+        ASSERT_TRUE(tree.remove(indexed_key(static_cast<uint32_t>(i), 100))) << "missing key " << i;
+    }
+    for (int i = 0; i < n; ++i) {
+        EXPECT_FALSE(btree_get(tree, indexed_key(static_cast<uint32_t>(i), 100)).has_value());
+    }
+
+    BNode root = pages.get(tree.root);
+    EXPECT_EQ(root.btype(), BNODE_LEAF); // shrunk back down from height 2
+    EXPECT_EQ(root.nkeys(), 1); // only the sentinel remains
+}
+
+TEST(BTreeRemove, WhenKeyIsEmptyThenRemoveThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    EXPECT_THROW(tree.remove({}), std::invalid_argument);
+}
+
+TEST(BTreeRemove, WhenKeyExceedsMaxSizeThenRemoveThrows) {
+    InMemoryPageManager pages;
+    BTree tree{0, &pages};
+    std::vector<uint8_t> big_key(BTREE_MAX_KEY_SIZE + 1, 'x');
+    EXPECT_THROW(tree.remove(big_key), std::invalid_argument);
+}
+
+// ============================================================================
+// Reference-model verification
+//
+// Wraps a BTree backed by an in-memory PageManager plus a reference
+// std::map, and verifies the tree's structural invariants (node sizes
+// within limits, keys sorted, internal keys mirroring their child's first
+// key) alongside the data matching the reference.
+// ============================================================================
+namespace {
+    struct BTreeReferenceModel {
+        InMemoryPageManager pages;
+        BTree tree{0, &pages};
+        std::map<std::vector<uint8_t>, std::vector<uint8_t>> ref;
+
+        void add(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+            tree.insert(key, val);
+            ref[key] = val;
+        }
+
+        bool del(const std::vector<uint8_t>& key) {
+            bool removed = tree.remove(key);
+            if (removed) {
+                ref.erase(key);
+            }
+            return removed;
+        }
+
+        // Checks structural invariants and that the tree's data matches
+        // `ref` (plus the leading empty-key sentinel every root carries).
+        void verify() const {
+            ASSERT_NE(tree.root, 0u);
+            std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>> collected;
+            verify_node(pages.get(tree.root), collected);
+
+            for (size_t i = 0; i + 1 < collected.size(); ++i) {
+                ASSERT_LT(collected[i].first, collected[i + 1].first)
+                    << "flattened leaf keys must be globally sorted";
+            }
+
+            ASSERT_EQ(collected.size(), ref.size() + 1)
+                << "leaf entries (minus the sentinel) must match the reference size";
+            ASSERT_TRUE(collected[0].first.empty()) << "leftmost key must be the sentinel";
+
+            auto ref_it = ref.begin();
+            for (size_t i = 1; i < collected.size(); ++i, ++ref_it) {
+                EXPECT_EQ(collected[i].first, ref_it->first);
+                EXPECT_EQ(collected[i].second, ref_it->second);
+            }
+        }
+
+    private:
+        void verify_node(
+            const BNode& node,
+            std::vector<std::pair<std::vector<uint8_t>, std::vector<uint8_t>>>& out
+        ) const {
+            ASSERT_LE(node.nbytes(), BTREE_PAGE_SIZE);
+            ASSERT_GE(node.nkeys(), 1);
+            for (uint16_t i = 0; static_cast<uint16_t>(i + 1) < node.nkeys(); ++i) {
+                ASSERT_LT(node.get_key(i), node.get_key(static_cast<uint16_t>(i + 1)))
+                    << "keys must be sorted within a node";
+            }
+
+            if (node.btype() == BNODE_LEAF) {
+                for (uint16_t i = 0; i < node.nkeys(); ++i) {
+                    out.emplace_back(node.get_key(i), node.get_val(i));
+                }
+                return;
+            }
+
+            for (uint16_t i = 0; i < node.nkeys(); ++i) {
+                BNode child = pages.get(node.get_ptr(i));
+                ASSERT_EQ(node.get_key(i), child.get_key(0))
+                    << "internal node key must mirror its child's first key";
+                verify_node(child, out);
+            }
+        }
+    };
+}
+
+TEST(BTreeReferenceModelTest, WhenManyKeysAreInsertedThenTreeStaysValidThroughout) {
+    BTreeReferenceModel model;
+
+    const int n = 300;
+    for (int i = 0; i < n; ++i) {
+        model.add(indexed_key(static_cast<uint32_t>(i), 20), std::vector<uint8_t>(20, 'v'));
+        if (i % 10 == 0) {
+            model.verify();
+        }
+    }
+    model.verify();
+}
+
+TEST(BTreeReferenceModelTest, WhenManyKeysAreInsertedAndDeletedInRandomOrderThenTreeStaysValidThroughout) {
+    BTreeReferenceModel model;
+    std::mt19937 rng(12345);
+
+    const int n = 300;
+    std::vector<std::vector<uint8_t>> keys;
+    for (int i = 0; i < n; ++i) {
+        keys.push_back(indexed_key(static_cast<uint32_t>(i), 20));
+    }
+    std::shuffle(keys.begin(), keys.end(), rng);
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        model.add(keys[i], std::vector<uint8_t>(20, static_cast<uint8_t>('a' + (i % 26))));
+        if (i % 10 == 0) {
+            model.verify();
+        }
+    }
+    model.verify();
+
+    std::shuffle(keys.begin(), keys.end(), rng);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        ASSERT_TRUE(model.del(keys[i])) << "key should have been present";
+        if (i % 10 == 0) {
+            model.verify();
+        }
+    }
+    model.verify(); // only the sentinel should remain
+}
+
+TEST(BTreeReferenceModelTest, WhenInsertsAndDeletesAreInterleavedThenTreeStaysValidThroughout) {
+    BTreeReferenceModel model;
+    std::mt19937 rng(9001);
+    std::uniform_int_distribution<int> op_dist(0, 2); // 2/3 chance of an insert vs. a delete
+    std::uniform_int_distribution<uint32_t> key_dist(0, 99);
+
+    for (int i = 0; i < 500; ++i) {
+        uint32_t k = key_dist(rng);
+        auto key = indexed_key(k, 20);
+        if (op_dist(rng) != 0 || model.ref.find(key) == model.ref.end()) {
+            model.add(key, std::vector<uint8_t>(20, static_cast<uint8_t>('a' + (k % 26))));
+        } else {
+            ASSERT_TRUE(model.del(key));
+        }
+        if (i % 10 == 0) {
+            model.verify();
+        }
+    }
+    model.verify();
 }

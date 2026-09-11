@@ -134,6 +134,7 @@ struct BTree {
     uint64_t root = 0;
     PageManager* pages = nullptr;
     void insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
+    bool remove(const std::vector<uint8_t>& key); // returns true if key found and deleted, false otherwise
 };
 
 // Recursively insert/update (key, val) starting at `node`, returning the new
@@ -164,12 +165,24 @@ enum class MergeDirection {
     Right,  // merge with the right sibling
 };
 
-// Should `updated` (the post-update replacement for node's child at idx) be
-// merged with a sibling? Returns {MergeDirection::Left, left sibling},
+// Determines if node should be merged. Returns {MergeDirection::Left, left sibling},
 // {MergeDirection::Right, right sibling}, or {MergeDirection::None, BNode{}}
 // if no merge should happen. A soft threshold (1/4 page) is used instead of
-// requiring an empty node, so merges happen earlier and mostly empty trees
-// don't retain a large number of nodes.
+// requiring an empty node, so merges happen earlier.
 std::pair<MergeDirection, BNode> should_merge(
     const BTree& tree, const BNode& node, uint16_t idx, const BNode& updated
 );
+
+// Recursively delete `key` starting at `node`, returning the new
+// (copy-on-write) node, or a BNode with empty `data` if `key` was not found.
+BNode tree_delete(
+    const BTree& tree, const BNode& node, const std::vector<uint8_t>& key
+);
+
+// Deletes `key` from the subtree rooted at the child of `old` at idx,
+// merging or replacing its link(s) in the returned node as needed. Returns a
+// BNode with empty `data` if `key` was not found in that subtree.
+BNode node_delete(
+    const BTree& tree, const BNode& old, uint16_t idx, const std::vector<uint8_t>& key
+);
+
