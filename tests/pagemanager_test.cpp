@@ -136,3 +136,17 @@ TEST_F(PageManagerTest, ReopenedPageManagerContinuesAllocatingAfterFlushedPages)
     uint64_t ptr = reopened.new_page(make_leaf(bytes("b"), bytes("2")));
     EXPECT_EQ(ptr, 2u);
 }
+
+TEST_F(PageManagerTest, RevertDiscardsBufferedPagesAndResetsFlushedCount) {
+    PageManager pages(fd_);
+    pages.new_page(make_leaf(bytes("a"), bytes("1")));
+    pages.write_pages();
+    pages.new_page(make_leaf(bytes("b"), bytes("2"))); // buffered, not yet written
+
+    pages.revert(2);
+
+    EXPECT_EQ(pages.flushed_pages(), 2u);
+    // The buffered page was discarded, so allocation resumes at 2.
+    uint64_t ptr = pages.new_page(make_leaf(bytes("c"), bytes("3")));
+    EXPECT_EQ(ptr, 2u);
+}

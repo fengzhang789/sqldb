@@ -38,6 +38,11 @@ class PageManager : public IPageManager {
         void write_pages(); // append pending new_page() pages to the file
         uint64_t flushed_pages() const { return page_flushed_; }
 
+        // Reverts to `flushed_pages` durable pages and discards any buffered
+        // (not-yet-written) pages, e.g. after a failed update: nothing on
+        // disk references either, so their page numbers are safe to reuse.
+        void revert(uint64_t flushed_pages);
+
     private:
         struct MmapChunk {
             uint8_t* data;

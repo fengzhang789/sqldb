@@ -32,12 +32,16 @@ struct KV {
     private:
         int fd_ = -1;
         BTree tree_;
+        bool failed_ = false; // did the last update fail? on-disk meta may not match memory
 
         std::optional<PageManager> pages_; // backs BTree pages with the on-disk file
 
+        void update_or_revert(const std::vector<uint8_t>& meta); // 2-phase update, reverting to `meta` on failure
         void update_file(); // write, fsync, root, fsync
         void update_root(); // pwrite the meta page; must be atomic
         void read_root(); // read/validate the meta page, or initialize an empty one
+        void load_meta(const std::vector<uint8_t>& data); // restore tree_.root/pages_ from meta bytes
+        void write_meta_page(const std::vector<uint8_t>& data); // pwrite raw meta bytes at offset 0
         std::vector<uint8_t> save_meta() const; // serialize the meta page (sig + root ptr + flushed pages)
         int create_file_sync(const std::string& path); // create/open file, fsync parent dir
 };

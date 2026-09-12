@@ -93,13 +93,15 @@ std::optional<std::vector<uint8_t>> KV::get(const std::vector<uint8_t>& key) con
 }
 
 void KV::set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
-    tree_.insert(key, val);
-    update_file();
+    std::vector<uint8_t> meta = save_meta();
+    tree_.insert(key, val); // throws (e.g. length limit) without mutating anything
+    update_or_revert(meta);
 }
 
 bool KV::del(const std::vector<uint8_t>& key) {
+    std::vector<uint8_t> meta = save_meta();
     bool deleted = tree_.remove(key);
-    update_file();
+    update_or_revert(meta);
     return deleted;
 }
 
@@ -142,12 +144,23 @@ void KV::read_root() {
     tree_.root = root;
 }
 
-// KV: two-phase update
-void KV::update_root() {
-    std::vector<uint8_t> meta = save_meta();
-    if (::pwrite(fd_, meta.data(), meta.size(), 0) != static_cast<ssize_t>(meta.size())) {
+// Restores tree_.root and the page manager's flushed-page count from
+// previously-saved meta bytes. Used both for a failed-update revert and
+// (via read_root) for the initial load, so it mirrors save_meta's layout.
+void KV::load_meta(const std::vector<uint8_t>& data) {
+    tree_.root = read_u64(data.data() + META_SIG_SIZE);
+    pages_->revert(read_u64(data.data() + META_SIG_SIZE + 8));
+}
+
+void KV::write_meta_page(const std::vector<uint8_t>& data) {
+    if (::pwrite(fd_, data.data(), data.size(), 0) != static_cast<ssize_t>(data.size())) {
         throw std::runtime_error(std::string("KV: write meta page failed: ") + std::strerror(errno));
     }
+}
+
+// KV: two-phase update
+void KV::update_root() {
+    write_meta_page(save_meta());
 }
 
 void KV::update_file() {
@@ -158,6 +171,33 @@ void KV::update_file() {
     update_root();
     if (::fsync(fd_) != 0) {
         throw std::runtime_error("KV: fsync failed");
+    }
+}
+
+// 2-phase update with revert-on-failure. `meta` is the meta page as of
+// before this operation's tree mutation, i.e. the last known-good state.
+//
+// After an fsync failure, a filesystem's page cache can disagree with what's
+// actually on disk, so we don't trust re-reading the meta page to recover -
+// instead we revert the in-memory state immediately (reads keep working) and
+// mark failed_, since the on-disk meta page is now in an unknown state: it
+// may hold the old or the new root. The next update rewrites and fsyncs
+// `meta` first, restoring a known-good on-disk state before it proceeds -
+// only then is it safe to let new pages reuse the reverted page numbers.
+void KV::update_or_revert(const std::vector<uint8_t>& meta) {
+    try {
+        if (failed_) {
+            write_meta_page(meta);
+            if (::fsync(fd_) != 0) {
+                throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
+            }
+            failed_ = false;
+        }
+        update_file();
+    } catch (...) {
+        load_meta(meta);
+        failed_ = true;
+        throw;
     }
 }
 

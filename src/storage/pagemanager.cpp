@@ -67,6 +67,11 @@ uint64_t PageManager::new_page(const BNode& node) {
 
 void PageManager::del(uint64_t) {}
 
+void PageManager::revert(uint64_t flushed_pages) {
+    page_flushed_ = flushed_pages;
+    page_temp_.clear();
+}
+
 void PageManager::write_pages() {
     if (page_temp_.empty()) {
         return;
