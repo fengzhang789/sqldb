@@ -34,6 +34,7 @@
  */
 
 #include "btree.h"
+#include "pagemanager.h"
 
 #include <cassert>
 #include <cstring>

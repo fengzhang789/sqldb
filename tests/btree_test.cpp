@@ -1,4 +1,5 @@
 #include "btree.h"
+#include "pagemanager.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -898,7 +899,7 @@ TEST(TreeDelete, WhenInternalNodeFirstKeyExceedsSearchKeyThenAsserts) {
 // tree_insert / node_insert: internal nodes, via an in-memory PageManager
 // ============================================================================
 namespace {
-    class InMemoryPageManager : public PageManager {
+    class InMemoryPageManager : public IPageManager {
     public:
         BNode get(uint64_t ptr) const override { return pages_.at(ptr); }
 

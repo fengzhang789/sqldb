@@ -121,19 +121,15 @@ void node_split(BNode& left, BNode& right, const BNode& old);
 // returns it unchanged as the sole element.
 std::vector<BNode> node_split_if_needed(const BNode& node);
 
-// Isolates the B+tree data structure from how pages are actually stored, so
-// the tree can be tested with an in-memory implementation and later backed
-// by a real file/mmap without changing any tree logic.
-struct PageManager {
-    virtual ~PageManager() = default;
-    virtual BNode get(uint64_t ptr) const = 0;
-    virtual uint64_t new_page(const BNode& node) = 0;
-    virtual void del(uint64_t ptr) = 0;
-};
+// IPageManager isolates the B+tree data structure from how pages are
+// actually stored, so the tree can be tested with an in-memory
+// implementation and later backed by a real file/mmap without changing any
+// tree logic. See pagemanager.h.
+struct IPageManager;
 
 struct BTree {
     uint64_t root = 0;
-    PageManager* pages = nullptr;
+    IPageManager* pages = nullptr;
     void insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
     bool remove(const std::vector<uint8_t>& key); // returns true if key found and deleted, false otherwise
     std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) const; // returns std::nullopt if key dne

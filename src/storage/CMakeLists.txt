@@ -3,5 +3,6 @@
 add_library(storage
     btree.cpp
     kv.cpp
+    pagemanager.cpp
 )
 target_include_directories(storage PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

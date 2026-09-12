@@ -1,5 +1,10 @@
-// Meta page (page 0) layout: signature (16B) | root ptr (8B) | flushed pages (8B) | unused
-// Written via a single pwrite() so the root pointer update is atomic.
+// Meta page (page 0) layout:
+// +-----------+----------+---------------+---------+
+// | signature | root ptr | flushed pages | unused  |
+// |   (16B)   |   (8B)   |     (8B)      | (bytes) |
+// +-----------+----------+---------------+---------+
+// Updated via a single pwrite() at offset 0, which is expected to be
+// power-loss-atomic since it's page-aligned and touches a single sector.
 
 #include "kv.h"
 
@@ -9,6 +14,24 @@
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
+
+namespace {
+    constexpr char DB_SIG[] = "DB"; // not compatible between chapters
+    constexpr size_t META_SIG_SIZE = 16;
+    constexpr size_t META_DATA_SIZE = META_SIG_SIZE + 8 + 8; // sig + root ptr + flushed pages
+
+    static_assert(sizeof(DB_SIG) - 1 <= META_SIG_SIZE, "DB_SIG must fit within the signature field");
+
+    void write_u64(uint8_t* ptr, uint64_t val) {
+        std::memcpy(ptr, &val, sizeof(val));
+    }
+
+    uint64_t read_u64(const uint8_t* ptr) {
+        uint64_t val;
+        std::memcpy(&val, ptr, sizeof(val));
+        return val;
+    }
+}
 
 // KV: lifecycle
 KV::KV(std::string path) : path(std::move(path)) {}
@@ -48,10 +71,10 @@ int KV::create_file_sync(const std::string& path) {
     return fd;
 }
 
-// TODO: implement meta-page read/validation and root restoration
 void KV::open() {
     fd_ = create_file_sync(path);
-    pages_.fd = fd_;
+    read_root();
+    tree_.pages = &*pages_;
 }
 
 void KV::close() {
@@ -61,7 +84,7 @@ void KV::close() {
     ::fsync(fd_);
     ::close(fd_);
     fd_ = -1;
-    pages_.fd = -1;
+    pages_.reset();
 }
 
 // KV: public API
@@ -80,19 +103,55 @@ bool KV::del(const std::vector<uint8_t>& key) {
     return deleted;
 }
 
-// KV: two-phase update
-// TODO: implement
-void KV::write_pages() {
-    return;
+// KV: meta page
+std::vector<uint8_t> KV::save_meta() const {
+    std::vector<uint8_t> data(META_DATA_SIZE, 0);
+    std::memcpy(data.data(), DB_SIG, sizeof(DB_SIG) - 1);
+    write_u64(data.data() + META_SIG_SIZE, tree_.root);
+    write_u64(data.data() + META_SIG_SIZE + 8, pages_->flushed_pages());
+    return data;
 }
 
-// TODO: implement
+// The meta page isn't written yet for an empty file; it's initialized on
+// the 1st update_root().
+void KV::read_root() {
+    struct stat st;
+    if (::fstat(fd_, &st) != 0) {
+        throw std::runtime_error(std::string("KV: fstat failed: ") + std::strerror(errno));
+    }
+    if (st.st_size == 0) {
+        pages_.emplace(fd_);
+        return;
+    }
+    if (static_cast<uint64_t>(st.st_size) < META_DATA_SIZE) {
+        throw std::runtime_error("KV: file too small to contain a meta page");
+    }
+
+    std::vector<uint8_t> data(META_DATA_SIZE);
+    ssize_t n = ::pread(fd_, data.data(), data.size(), 0);
+    if (n != static_cast<ssize_t>(data.size())) {
+        throw std::runtime_error("KV: read meta page failed");
+    }
+    if (std::memcmp(data.data(), DB_SIG, sizeof(DB_SIG) - 1) != 0) {
+        throw std::runtime_error("KV: not a valid db file (bad signature)");
+    }
+
+    uint64_t root = read_u64(data.data() + META_SIG_SIZE);
+    uint64_t flushed = read_u64(data.data() + META_SIG_SIZE + 8);
+    pages_.emplace(fd_, flushed);
+    tree_.root = root;
+}
+
+// KV: two-phase update
 void KV::update_root() {
-    return;
+    std::vector<uint8_t> meta = save_meta();
+    if (::pwrite(fd_, meta.data(), meta.size(), 0) != static_cast<ssize_t>(meta.size())) {
+        throw std::runtime_error(std::string("KV: write meta page failed: ") + std::strerror(errno));
+    }
 }
 
 void KV::update_file() {
-    write_pages();
+    pages_->write_pages();
     if (::fsync(fd_) != 0) {
         throw std::runtime_error("KV: fsync failed");
     }

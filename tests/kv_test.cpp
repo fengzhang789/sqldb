@@ -48,15 +48,19 @@ TEST_F(KVTest, OpenCreatesTheFileIfItDoesNotExist) {
 }
 
 TEST_F(KVTest, OpenSucceedsOnAnAlreadyExistingFile) {
+    uintmax_t size_before;
     {
-        std::ofstream f(path_, std::ios::binary);
-        f << "preexisting";
+        KV db(path_);
+        db.open();
+        db.set(bytes("key"), bytes("value"));
+        db.close();
+        size_before = std::filesystem::file_size(path_);
     }
 
     KV db(path_);
     EXPECT_NO_THROW(db.open());
     // The existing file must not be truncated by opening it.
-    EXPECT_EQ(std::filesystem::file_size(path_), 11u);
+    EXPECT_EQ(std::filesystem::file_size(path_), size_before);
 }
 
 TEST_F(KVTest, OpenThrowsWhenParentDirectoryDoesNotExist) {
@@ -64,5 +68,105 @@ TEST_F(KVTest, OpenThrowsWhenParentDirectoryDoesNotExist) {
     EXPECT_THROW(db.open(), std::runtime_error);
 }
 
-// TODO: re-add set/get/del persistence and signature-validation tests once
-// open()/write_pages()/update_root() are implemented.
+TEST_F(KVTest, SetThenGetReturnsTheValue) {
+    KV db(path_);
+    db.open();
+    db.set(bytes("key"), bytes("value"));
+    EXPECT_EQ(db.get(bytes("key")), bytes("value"));
+}
+
+TEST_F(KVTest, SetThenDelRemovesTheKey) {
+    KV db(path_);
+    db.open();
+    db.set(bytes("key"), bytes("value"));
+    EXPECT_TRUE(db.del(bytes("key")));
+    EXPECT_EQ(db.get(bytes("key")), std::nullopt);
+}
+
+TEST_F(KVTest, DelOnMissingKeyReturnsFalse) {
+    KV db(path_);
+    db.open();
+    EXPECT_FALSE(db.del(bytes("missing")));
+}
+
+TEST_F(KVTest, DataSurvivesCloseAndReopen) {
+    {
+        KV db(path_);
+        db.open();
+        db.set(bytes("a"), bytes("1"));
+        db.set(bytes("b"), bytes("2"));
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    EXPECT_EQ(db.get(bytes("a")), bytes("1"));
+    EXPECT_EQ(db.get(bytes("b")), bytes("2"));
+}
+
+TEST_F(KVTest, ManyKeysSurviveCloseAndReopen) {
+    constexpr int kCount = 200;
+    {
+        KV db(path_);
+        db.open();
+        for (int i = 0; i < kCount; ++i) {
+            db.set(bytes("key" + std::to_string(i)), bytes("value" + std::to_string(i)));
+        }
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    for (int i = 0; i < kCount; ++i) {
+        EXPECT_EQ(db.get(bytes("key" + std::to_string(i))), bytes("value" + std::to_string(i)));
+    }
+}
+
+TEST_F(KVTest, DeletesSurviveCloseAndReopen) {
+    {
+        KV db(path_);
+        db.open();
+        db.set(bytes("a"), bytes("1"));
+        db.set(bytes("b"), bytes("2"));
+        db.del(bytes("a"));
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    EXPECT_EQ(db.get(bytes("a")), std::nullopt);
+    EXPECT_EQ(db.get(bytes("b")), bytes("2"));
+}
+
+TEST_F(KVTest, ReopeningAnEmptyTreeStillFindsNothing) {
+    {
+        KV db(path_);
+        db.open();
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    EXPECT_EQ(db.get(bytes("anything")), std::nullopt);
+}
+
+TEST_F(KVTest, OpenThrowsOnBadSignature) {
+    {
+        std::ofstream f(path_, std::ios::binary);
+        std::string garbage(32, '\xff');
+        f.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+
+    KV db(path_);
+    EXPECT_THROW(db.open(), std::runtime_error);
+}
+
+TEST_F(KVTest, OpenThrowsWhenFileIsTooSmallForAMetaPage) {
+    {
+        std::ofstream f(path_, std::ios::binary);
+        f << "DB"; // shorter than the 32-byte meta page
+    }
+
+    KV db(path_);
+    EXPECT_THROW(db.open(), std::runtime_error);
+}

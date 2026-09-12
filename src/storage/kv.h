@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "btree.h"
+#include "pagemanager.h"
 
 // KV is a durable, crash-safe key-value store backed by a copy-on-write
 // B+tree persisted to a single file.
@@ -32,15 +33,12 @@ struct KV {
         int fd_ = -1;
         BTree tree_;
 
-        // Backs BTree pages with the on-disk file (TODO: wire up)
-        struct FilePages {
-            int fd = -1;
-        };
-        FilePages pages_;
+        std::optional<PageManager> pages_; // backs BTree pages with the on-disk file
 
         void update_file(); // write, fsync, root, fsync
-        void write_pages(); // TODO: implement
-        void update_root(); // TODO: implement
+        void update_root(); // pwrite the meta page; must be atomic
+        void read_root(); // read/validate the meta page, or initialize an empty one
+        std::vector<uint8_t> save_meta() const; // serialize the meta page (sig + root ptr + flushed pages)
         int create_file_sync(const std::string& path); // create/open file, fsync parent dir
 };
 

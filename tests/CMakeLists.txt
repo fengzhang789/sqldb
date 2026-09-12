@@ -18,6 +18,12 @@ add_executable(kv_tests
 )
 target_link_libraries(kv_tests PRIVATE storage GTest::gtest_main)
 
+add_executable(pagemanager_tests
+    pagemanager_test.cpp
+)
+target_link_libraries(pagemanager_tests PRIVATE storage GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(btree_tests)
 gtest_discover_tests(kv_tests)
+gtest_discover_tests(pagemanager_tests)
