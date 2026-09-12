@@ -11,7 +11,13 @@ FetchContent_MakeAvailable(googletest)
 add_executable(btree_tests
     btree_test.cpp
 )
-target_link_libraries(btree_tests PRIVATE btree GTest::gtest_main)
+target_link_libraries(btree_tests PRIVATE storage GTest::gtest_main)
+
+add_executable(kv_tests
+    kv_test.cpp
+)
+target_link_libraries(kv_tests PRIVATE storage GTest::gtest_main)
 
 include(GoogleTest)
 gtest_discover_tests(btree_tests)
+gtest_discover_tests(kv_tests)
