@@ -28,8 +28,26 @@ add_executable(freelist_tests
 )
 target_link_libraries(freelist_tests PRIVATE storage GTest::gtest_main)
 
+add_executable(catalog_tests
+    catalog_test.cpp
+)
+target_link_libraries(catalog_tests PRIVATE catalog storage GTest::gtest_main)
+
+add_executable(row_codec_tests
+    row_codec_test.cpp
+)
+target_link_libraries(row_codec_tests PRIVATE access catalog storage GTest::gtest_main)
+
+add_executable(table_access_tests
+    table_access_test.cpp
+)
+target_link_libraries(table_access_tests PRIVATE access catalog storage GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(btree_tests)
 gtest_discover_tests(kv_tests)
 gtest_discover_tests(pagemanager_tests)
 gtest_discover_tests(freelist_tests)
+gtest_discover_tests(catalog_tests)
+gtest_discover_tests(row_codec_tests)
+gtest_discover_tests(table_access_tests)
