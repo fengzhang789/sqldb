@@ -1,7 +1,7 @@
-#include "row_codec.h"
+#include "access/row_codec.h"
 
-#include "order_preserving.h"
-#include "tabledef.h"
+#include "encoding/order_preserving.h"
+#include "catalog/tabledef.h"
 
 #include <string>
 #include <vector>

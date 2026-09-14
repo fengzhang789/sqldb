@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-#include "value.h"
+#include "catalog/value.h"
 
 // Record is a name/value view of a row, in whatever column order the caller built it in.
 struct Record {

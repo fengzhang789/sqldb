@@ -6,5 +6,5 @@ add_library(catalog
     tabledef.cpp
     catalog.cpp
 )
-target_include_directories(catalog PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(catalog PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(catalog PUBLIC storage)

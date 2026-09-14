@@ -1,8 +1,8 @@
-#include "table_access.h"
+#include "access/table_access.h"
 
-#include "row_codec.h"
-#include "scanner.h"
-#include "../encoding/order_preserving.h"
+#include "access/row_codec.h"
+#include "access/scanner.h"
+#include "encoding/order_preserving.h"
 
 namespace {
     std::vector<uint8_t> to_bytes(const std::string& s) {

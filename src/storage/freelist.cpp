@@ -1,4 +1,4 @@
-#include "freelist.h"
+#include "storage/freelist.h"
 
 namespace {
     size_t seq_to_idx(uint64_t seq) {

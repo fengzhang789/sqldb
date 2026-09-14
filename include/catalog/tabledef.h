@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "value.h"
+#include "catalog/value.h"
 
 struct TableDef {
     std::string name; // table name

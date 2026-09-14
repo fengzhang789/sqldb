@@ -4,5 +4,5 @@ add_library(access
     scanner.cpp
     table_access.cpp
 )
-target_include_directories(access PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(access PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(access PUBLIC catalog encoding storage)

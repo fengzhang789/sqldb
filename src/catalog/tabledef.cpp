@@ -1,4 +1,4 @@
-#include "tabledef.h"
+#include "catalog/tabledef.h"
 
 #include <sstream>
 

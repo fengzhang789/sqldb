@@ -2,5 +2,5 @@
 add_library(encoding
     order_preserving.cpp
 )
-target_include_directories(encoding PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(encoding PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(encoding PUBLIC catalog)

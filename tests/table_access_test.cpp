@@ -1,6 +1,6 @@
-#include "table_access.h"
+#include "access/table_access.h"
 
-#include "tabledef.h"
+#include "catalog/tabledef.h"
 
 #include <filesystem>
 #include <memory>

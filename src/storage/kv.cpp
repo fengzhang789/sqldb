@@ -8,7 +8,7 @@
 // Updated via a single pwrite() at offset 0, which is expected to be
 // power-loss-atomic since it's page-aligned and touches a single sector.
 
-#include "kv.h"
+#include "storage/kv.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>

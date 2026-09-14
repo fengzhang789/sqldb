@@ -4,7 +4,7 @@
 #include <utility>
 #include <vector>
 
-#include "btree.h"
+#include "storage/btree.h"
 
 // Relations for BTree::seek and range scans; the sign is the scan direction (> 0 walks forward).
 enum CMP : int {

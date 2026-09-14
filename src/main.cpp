@@ -1,5 +1,5 @@
 #include <iostream>
-#include "btree.h"
+#include "storage/btree.h"
 
 int main() {
     // Construct a leaf node with test key-values: {"k1":"hi", "k3":"hello"}

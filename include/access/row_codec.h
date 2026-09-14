@@ -4,9 +4,9 @@
 #include <string>
 #include <vector>
 
-#include "../catalog/record.h"
-#include "../catalog/tabledef.h"
-#include "../catalog/value.h"
+#include "catalog/record.h"
+#include "catalog/tabledef.h"
+#include "catalog/value.h"
 
 // encode_key/decode_key/check_record operate on arbitrary user TableDefs. Keys and non-key column values both use
 // order_preserving.h's encode_values/decode_values, so encoded keys sort in primary-key order.

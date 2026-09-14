@@ -4,10 +4,10 @@
 #include <utility>
 #include <vector>
 
-#include "../catalog/record.h"
-#include "../catalog/tabledef.h"
-#include "../storage/btree_iter.h"
-#include "../storage/kv.h"
+#include "catalog/record.h"
+#include "catalog/tabledef.h"
+#include "storage/btree_iter.h"
+#include "storage/kv.h"
 
 // Scanner is a range query over a table's primary key: it starts at the row closest to key1 satisfying cmp1, then
 // walks toward key2 (forward if cmp1 > 0, backward otherwise) while rows satisfy cmp2 relative to key2.

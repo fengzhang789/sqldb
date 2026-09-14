@@ -6,7 +6,7 @@
 #include <cstring>
 #include <type_traits>
 
-#include "btree.h" // BTREE_PAGE_SIZE
+#include "storage/btree.h" // BTREE_PAGE_SIZE
 
 // Free list node layout (one page):
 // +--------+---------------+---------+

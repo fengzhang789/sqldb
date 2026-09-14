@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "../catalog/value.h"
+#include "catalog/value.h"
 
 // Order-preserving encoding: for values of the same types, comparing the encoded bytes orders them the same way as
 // comparing the values, so encoded primary keys sort correctly in the B+tree. Decoders throw std::invalid_argument

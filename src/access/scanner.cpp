@@ -1,9 +1,9 @@
-#include "scanner.h"
+#include "access/scanner.h"
 
 #include <cassert>
 
-#include "row_codec.h"
-#include "../encoding/order_preserving.h"
+#include "access/row_codec.h"
+#include "encoding/order_preserving.h"
 
 namespace {
     std::vector<uint8_t> to_bytes(const std::string& s) {

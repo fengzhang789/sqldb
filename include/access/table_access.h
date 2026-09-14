@@ -2,9 +2,9 @@
 
 #include <string>
 
-#include "../catalog/record.h"
-#include "../catalog/tabledef.h"
-#include "../storage/kv.h"
+#include "catalog/record.h"
+#include "catalog/tabledef.h"
+#include "storage/kv.h"
 
 enum class UpdateMode {
     UPSERT,       // insert or overwrite

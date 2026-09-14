@@ -1,10 +1,10 @@
-#include "catalog.h"
+#include "catalog/catalog.h"
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-#include "tabledef.h"
+#include "catalog/tabledef.h"
 
 namespace {
     // key = 4-byte big-endian prefix + primary-key bytes.

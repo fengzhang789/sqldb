@@ -1,4 +1,4 @@
-#include "record.h"
+#include "catalog/record.h"
 
 Record& Record::add_str(const std::string& col, std::string val) {
     cols.push_back(col);

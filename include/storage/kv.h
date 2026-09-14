@@ -5,9 +5,9 @@
 #include <string>
 #include <vector>
 
-#include "btree.h"
-#include "btree_iter.h"
-#include "pagemanager.h"
+#include "storage/btree.h"
+#include "storage/btree_iter.h"
+#include "storage/pagemanager.h"
 
 // KV is a durable, crash-safe key-value store backed by a copy-on-write
 // B+tree persisted to a single file.

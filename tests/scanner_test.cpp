@@ -1,7 +1,7 @@
-#include "scanner.h"
+#include "access/scanner.h"
 
-#include "table_access.h"
-#include "tabledef.h"
+#include "access/table_access.h"
+#include "catalog/tabledef.h"
 
 #include <algorithm>
 #include <cstdint>

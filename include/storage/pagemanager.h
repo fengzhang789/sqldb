@@ -4,8 +4,8 @@
 #include <map>
 #include <vector>
 
-#include "btree.h"
-#include "freelist.h"
+#include "storage/btree.h"
+#include "storage/freelist.h"
 
 // IPageManager isolates the B+tree data structure from how pages are
 // actually stored, so the tree can be tested with an in-memory

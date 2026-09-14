@@ -1,8 +1,8 @@
-#include "row_codec.h"
+#include "access/row_codec.h"
 
 #include <stdexcept>
 
-#include "../encoding/order_preserving.h"
+#include "encoding/order_preserving.h"
 
 namespace {
     constexpr size_t KEY_PREFIX_SIZE = 4; // encode_key's big-endian table prefix

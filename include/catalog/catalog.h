@@ -6,8 +6,8 @@
 #include <string>
 #include <unordered_map>
 
-#include "tabledef.h"
-#include "../storage/kv.h"
+#include "catalog/tabledef.h"
+#include "storage/kv.h"
 
 // @meta is a bootstrap table used by the DB itself to store arbitrary metadata, e.g. the next unallocated prefix.
 extern const TableDef TDEF_META;

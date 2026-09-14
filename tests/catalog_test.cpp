@@ -1,5 +1,5 @@
-#include "catalog.h"
-#include "tabledef.h"
+#include "catalog/catalog.h"
+#include "catalog/tabledef.h"
 
 #include <filesystem>
 #include <memory>
