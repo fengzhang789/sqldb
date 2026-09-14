@@ -8,16 +8,14 @@
 #include "../catalog/tabledef.h"
 #include "../catalog/value.h"
 
-// encode_key/encode_values/decode_values operate on arbitrary user TableDefs.
+// encode_key/decode_key/check_record operate on arbitrary user TableDefs. Keys and non-key column values both use
+// order_preserving.h's encode_values/decode_values, so encoded keys sort in primary-key order.
 
 // 4-byte big-endian prefix followed by the encoded primary-key values.
 std::string encode_key(uint32_t prefix, const std::vector<Value>& pk_values);
 
-// Serializes non-key column values into bytes.
-std::string encode_values(const std::vector<Value>& values);
-
-// Inverse of encode_values; `out` must be pre-sized/typed by the caller, since the encoding carries no type tags.
-void decode_values(const std::string& data, std::vector<Value>* out);
+// Inverse of encode_key, skipping the prefix; `out` must be pre-sized/typed by the caller.
+void decode_key(const std::string& key, std::vector<Value>* out);
 
 // Reorders rec's columns to match tdef.cols; n == tdef.pkeys requires exactly the pk columns, n == tdef.cols.size()
 // requires every column. On success *out holds the first n values in tdef.cols order; false with *err set on a

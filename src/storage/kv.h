@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "btree.h"
+#include "btree_iter.h"
 #include "pagemanager.h"
 
 // KV is a durable, crash-safe key-value store backed by a copy-on-write
@@ -31,6 +32,7 @@ struct KV {
         std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) const;
         void set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
         bool del(const std::vector<uint8_t>& key);
+        BIter seek(const std::vector<uint8_t>& key, CMP cmp) const; // invalidated by any later set()/del()
 
     private:
         int fd_ = -1;

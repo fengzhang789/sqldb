@@ -127,12 +127,17 @@ std::vector<BNode> node_split_if_needed(const BNode& node);
 // tree logic. See pagemanager.h.
 struct IPageManager;
 
+struct BIter; // see btree_iter.h
+enum CMP : int; // see btree_iter.h
+
 struct BTree {
     uint64_t root = 0;
     IPageManager* pages = nullptr;
     void insert(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
     bool remove(const std::vector<uint8_t>& key); // returns true if key found and deleted, false otherwise
     std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) const; // returns std::nullopt if key dne
+    BIter seek_le(const std::vector<uint8_t>& key) const; // the last key <= key, or before the first key if none
+    BIter seek(const std::vector<uint8_t>& key, CMP cmp) const; // the closest key to `key` satisfying cmp
 };
 
 // Recursively insert/update (key, val) starting at `node`, returning the new

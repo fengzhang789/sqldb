@@ -13,6 +13,11 @@ add_executable(btree_tests
 )
 target_link_libraries(btree_tests PRIVATE storage GTest::gtest_main)
 
+add_executable(btree_iter_tests
+    btree_iter_test.cpp
+)
+target_link_libraries(btree_iter_tests PRIVATE storage GTest::gtest_main)
+
 add_executable(kv_tests
     kv_test.cpp
 )
@@ -33,18 +38,31 @@ add_executable(catalog_tests
 )
 target_link_libraries(catalog_tests PRIVATE catalog storage GTest::gtest_main)
 
+add_executable(order_preserving_tests
+    order_preserving_test.cpp
+)
+target_link_libraries(order_preserving_tests PRIVATE encoding catalog GTest::gtest_main)
+
 add_executable(row_codec_tests
     row_codec_test.cpp
 )
-target_link_libraries(row_codec_tests PRIVATE access catalog storage GTest::gtest_main)
+target_link_libraries(row_codec_tests PRIVATE access encoding catalog storage GTest::gtest_main)
 
 add_executable(table_access_tests
     table_access_test.cpp
 )
 target_link_libraries(table_access_tests PRIVATE access catalog storage GTest::gtest_main)
 
+add_executable(scanner_tests
+    scanner_test.cpp
+)
+target_link_libraries(scanner_tests PRIVATE access encoding catalog storage GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(btree_tests)
+gtest_discover_tests(btree_iter_tests)
+gtest_discover_tests(order_preserving_tests)
+gtest_discover_tests(scanner_tests)
 gtest_discover_tests(kv_tests)
 gtest_discover_tests(pagemanager_tests)
 gtest_discover_tests(freelist_tests)

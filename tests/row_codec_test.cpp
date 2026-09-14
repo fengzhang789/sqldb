@@ -1,5 +1,6 @@
 #include "row_codec.h"
 
+#include "order_preserving.h"
 #include "tabledef.h"
 
 #include <string>

@@ -12,8 +12,9 @@ enum class UpdateMode {
     INSERT_ONLY,  // fail if the row already exists
 };
 
-// Point query by primary key (rec supplies exactly the pk columns); on a hit, decoded columns are appended to rec.
-// Returns false with *err unset if the row doesn't exist, or false with *err set if rec is malformed.
+// Point query by primary key (rec supplies exactly the pk columns), run as the range scan [rec, rec]; on a hit, *rec
+// is replaced by the full row in tdef column order. Returns false with *err unset if the row doesn't exist, or false
+// with *err set if rec is malformed.
 bool db_get(KV* kv, const TableDef& tdef, Record* rec, std::string* err);
 
 // Insert/update a full row (rec must supply every column) per mode; false with *err set if rec is malformed or

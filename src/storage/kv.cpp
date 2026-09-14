@@ -141,6 +141,10 @@ bool KV::del(const std::vector<uint8_t>& key) {
     return deleted;
 }
 
+BIter KV::seek(const std::vector<uint8_t>& key, CMP cmp) const {
+    return tree_.seek(key, cmp);
+}
+
 // KV: meta page
 std::vector<uint8_t> KV::save_meta() const {
     const FreeListState& fl = pages_->free_state();
