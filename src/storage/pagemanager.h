@@ -1,9 +1,11 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <vector>
 
 #include "btree.h"
+#include "freelist.h"
 
 // IPageManager isolates the B+tree data structure from how pages are
 // actually stored, so the tree can be tested with an in-memory
@@ -16,32 +18,46 @@ struct IPageManager {
     virtual void del(uint64_t ptr) = 0;
 };
 
-// PageManager is an mmap-backed IPageManager. Existing pages are read
-// straight out of a growable set of read-only mmap regions covering the
-// file; newly created pages are buffered in memory (new_page) until
-// write_pages() appends them to the file and folds them into the readable
-// range. Ptr 0 is never handed out: it's reserved for the file's meta page
-// (page 0), keeping it distinct from BTree's root == 0 "empty tree" sentinel.
-class PageManager : public IPageManager {
+// PageManager is an mmap-backed IPageManager. Durable pages are read straight
+// out of a growable set of read-only mmap regions covering the file, while
+// pending writes are buffered in memory until write_pages() flushes them.
+//
+// Freed pages go to a FreeList and are reused by later updates, so a page is
+// written more than once and the buffered pages are keyed by page number
+// rather than forming an append queue. Reuse stays crash-safe because a page
+// is only reusable once an update that no longer references it is durable
+// (release_freed_pages()).
+//
+// Ptr 0 is never handed out: it's reserved for the file's meta page (page 0),
+// keeping it distinct from BTree's root == 0 "empty tree" sentinel. Page 1 is
+// reserved for the free list's first node.
+class PageManager : public IPageManager, private IFreeListPages {
     public:
-        // `flushed_pages` is the on-disk page count restored from the meta
-        // page when reopening a file; defaults to 1 for a fresh file.
-        explicit PageManager(int fd, uint64_t flushed_pages = 1);
+        // A fresh (zero-length) file: the free list's empty first node is
+        // buffered for the first write_pages() to lay down.
+        explicit PageManager(int fd);
+
+        // Reopens a file with the page count and free list state from its meta page.
+        PageManager(int fd, uint64_t flushed_pages, const FreeListState& free_state);
+
         ~PageManager() override;
         PageManager(const PageManager&) = delete;
         PageManager& operator=(const PageManager&) = delete;
 
         BNode get(uint64_t ptr) const override;
-        uint64_t new_page(const BNode& node) override;
-        void del(uint64_t ptr) override; // no-op: pages are reclaimed once a free list exists
+        uint64_t new_page(const BNode& node) override; // reuse a free page, else append
+        void del(uint64_t ptr) override; // hand the page to the free list
 
-        void write_pages(); // append pending new_page() pages to the file
+        void write_pages(); // write the pages buffered by this update
+        void release_freed_pages(); // the last update is durable: its freed pages are reusable
+
         uint64_t flushed_pages() const { return page_flushed_; }
+        const FreeListState& free_state() const { return free_.state(); }
 
-        // Reverts to `flushed_pages` durable pages and discards any buffered
-        // (not-yet-written) pages, e.g. after a failed update: nothing on
-        // disk references either, so their page numbers are safe to reuse.
-        void revert(uint64_t flushed_pages);
+        // Reverts to a durable page count and free list state, discarding
+        // buffered pages, e.g. after a failed update: nothing durable
+        // references them, so their page numbers are safe to hand out again.
+        void revert(uint64_t flushed_pages, const FreeListState& free_state);
 
     private:
         struct MmapChunk {
@@ -49,12 +65,21 @@ class PageManager : public IPageManager {
             size_t size; // bytes
         };
 
+        // IFreeListPages: the free list keeps its nodes in the same file.
+        const uint8_t* read_page(uint64_t ptr) const override;
+        uint8_t* write_page(uint64_t ptr) override;
+        uint64_t append_page() override;
+
+        void extend_mmap(size_t size); // grow the mmap so it covers at least `size` bytes
+        const uint8_t* mmap_page(uint64_t ptr) const; // durable page bytes, read-only
+
         int fd_ = -1;
         size_t mmap_total_ = 0; // total mapped bytes, can exceed the file size
         std::vector<MmapChunk> mmap_chunks_;
 
-        uint64_t page_flushed_ = 1; // pages already on disk; starts at 1 (page 0 is the meta page)
-        std::vector<std::vector<uint8_t>> page_temp_; // pages from new_page() not yet flushed
+        uint64_t page_flushed_ = 2; // pages already on disk (page 0: meta, page 1: free list)
+        uint64_t page_append_ = 0; // pages this update appends past page_flushed_
+        std::map<uint64_t, std::vector<uint8_t>> page_updates_; // buffered writes, by page number
 
-        void extend_mmap(size_t size); // grow the mmap so it covers at least `size` bytes
+        FreeList free_;
 };

@@ -12,7 +12,10 @@
 // B+tree persisted to a single file.
 // Two phase update: new B+tree pages are fsynced before the root is fsynced
 // to make the whole tree atomic.
-// Note: single-process sequential access, and the file is append only
+// Pages dropped by an update are recycled through a free list (see freelist.h)
+// whose position is committed in the meta page with the tree root, so a page is
+// only reused once the version referencing it has been replaced.
+// Note: single-process sequential access
 struct KV {
     public:
         std::string path;
@@ -42,7 +45,7 @@ struct KV {
         void read_root(); // read/validate the meta page, or initialize an empty one
         void load_meta(const std::vector<uint8_t>& data); // restore tree_.root/pages_ from meta bytes
         void write_meta_page(const std::vector<uint8_t>& data); // pwrite raw meta bytes at offset 0
-        std::vector<uint8_t> save_meta() const; // serialize the meta page (sig + root ptr + flushed pages)
+        std::vector<uint8_t> save_meta() const; // serialize the meta page
         int create_file_sync(const std::string& path); // create/open file, fsync parent dir
 };
 

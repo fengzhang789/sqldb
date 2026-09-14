@@ -2,6 +2,7 @@
 # executable and tests.
 add_library(storage
     btree.cpp
+    freelist.cpp
     kv.cpp
     pagemanager.cpp
 )
