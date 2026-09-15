@@ -141,6 +141,26 @@ bool KV::del(const std::vector<uint8_t>& key) {
     return deleted;
 }
 
+bool KV::update(InsertReq* req) {
+    std::optional<std::vector<uint8_t>> old = tree_.get(req->key);
+    req->added = !old.has_value();
+    req->old = std::move(old).value_or(std::vector<uint8_t>{});
+    if ((req->mode == UpdateMode::INSERT_ONLY && !req->added) || (req->mode == UpdateMode::UPDATE_ONLY && req->added)) {
+        return false;
+    }
+    set(req->key, req->val);
+    return true;
+}
+
+bool KV::del(DeleteReq* req) {
+    std::optional<std::vector<uint8_t>> old = tree_.get(req->key);
+    if (!old.has_value()) {
+        return false;
+    }
+    req->old = std::move(*old);
+    return del(req->key);
+}
+
 BIter KV::seek(const std::vector<uint8_t>& key, CMP cmp) const {
     return tree_.seek(key, cmp);
 }

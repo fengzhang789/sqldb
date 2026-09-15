@@ -11,7 +11,9 @@ struct TableDef {
     std::vector<ValueType> types; // column types, parallel to cols
     std::vector<std::string> cols; // column names
     int pkeys = 0; // the first pkeys columns in cols form the primary key
+    std::vector<std::vector<std::string>> indexes; // secondary index columns; table_new appends missing pk columns
     uint32_t prefix = 0; // auto assigned unique prefix for the PK to avoid collision
+    std::vector<uint32_t> index_prefixes; // auto assigned unique prefixes, parallel to indexes
 };
 
 // Serialize/deserialize a TableDef to/from its on-disk representation.
@@ -25,6 +27,7 @@ class TableDefBuilder {
         explicit TableDefBuilder(std::string name);
         TableDefBuilder& add_col(std::string name, ValueType type);
         TableDefBuilder& set_pkeys(int pkeys);
+        TableDefBuilder& add_index(std::vector<std::string> cols);
         TableDefBuilder& set_prefix(uint32_t prefix);
         TableDef build() const;
 

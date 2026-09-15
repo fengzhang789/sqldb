@@ -153,6 +153,65 @@ TEST_F(KVTest, DelOnMissingKeyReturnsFalse) {
     EXPECT_FALSE(db.del(bytes("missing")));
 }
 
+// ============================================================================
+// InsertReq / DeleteReq
+// ============================================================================
+TEST_F(KVTest, WhenUpdateInsertsANewKeyThenAddedIsTrueAndOldIsEmpty) {
+    KV db(path_);
+    db.open();
+    InsertReq req{bytes("key"), bytes("value")};
+    req.old = bytes("stale");
+
+    EXPECT_TRUE(db.update(&req));
+    EXPECT_TRUE(req.added);
+    EXPECT_TRUE(req.old.empty());
+    EXPECT_EQ(db.get(bytes("key")), bytes("value"));
+}
+
+TEST_F(KVTest, WhenUpdateOverwritesAKeyThenOldHoldsThePreviousValue) {
+    KV db(path_);
+    db.open();
+    db.set(bytes("key"), bytes("v1"));
+    InsertReq req{bytes("key"), bytes("v2")};
+
+    EXPECT_TRUE(db.update(&req));
+    EXPECT_FALSE(req.added);
+    EXPECT_EQ(req.old, bytes("v1"));
+    EXPECT_EQ(db.get(bytes("key")), bytes("v2"));
+}
+
+TEST_F(KVTest, WhenTheUpdateModeIsNotMetThenUpdateReturnsFalseWithoutWriting) {
+    KV db(path_);
+    db.open();
+    db.set(bytes("key"), bytes("v1"));
+    uint64_t root = read_meta_field(path_, kMetaRoot);
+
+    InsertReq insert{bytes("key"), bytes("v2"), UpdateMode::INSERT_ONLY};
+    EXPECT_FALSE(db.update(&insert));
+    EXPECT_EQ(insert.old, bytes("v1"));
+    InsertReq update{bytes("missing"), bytes("v2"), UpdateMode::UPDATE_ONLY};
+    EXPECT_FALSE(db.update(&update));
+
+    EXPECT_EQ(db.get(bytes("key")), bytes("v1"));
+    EXPECT_EQ(db.get(bytes("missing")), std::nullopt);
+    EXPECT_EQ(read_meta_field(path_, kMetaRoot), root);
+}
+
+TEST_F(KVTest, WhenDelReqRemovesAKeyThenOldHoldsTheRemovedValue) {
+    KV db(path_);
+    db.open();
+    db.set(bytes("key"), bytes("value"));
+    DeleteReq req{bytes("key")};
+
+    EXPECT_TRUE(db.del(&req));
+    EXPECT_EQ(req.old, bytes("value"));
+    EXPECT_EQ(db.get(bytes("key")), std::nullopt);
+
+    DeleteReq missing{bytes("key")};
+    EXPECT_FALSE(db.del(&missing));
+    EXPECT_TRUE(missing.old.empty());
+}
+
 TEST_F(KVTest, DataSurvivesCloseAndReopen) {
     {
         KV db(path_);

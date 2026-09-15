@@ -9,6 +9,28 @@
 #include "storage/btree_iter.h"
 #include "storage/pagemanager.h"
 
+// Existence requirement for KV::update.
+enum class UpdateMode {
+    UPSERT,       // insert or overwrite
+    UPDATE_ONLY,  // fail if the key does not exist
+    INSERT_ONLY,  // fail if the key already exists
+};
+
+// KV::update's request: key, val and mode in; added and old out.
+struct InsertReq {
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> val;
+    UpdateMode mode = UpdateMode::UPSERT;
+    bool added = false; // out: the key didn't exist before
+    std::vector<uint8_t> old; // out: the previous value, if !added
+};
+
+// KV::del's request: key in; old out.
+struct DeleteReq {
+    std::vector<uint8_t> key;
+    std::vector<uint8_t> old; // out: the deleted value
+};
+
 // KV is a durable, crash-safe key-value store backed by a copy-on-write
 // B+tree persisted to a single file.
 // Two phase update: new B+tree pages are fsynced before the root is fsynced
@@ -32,6 +54,8 @@ struct KV {
         std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) const;
         void set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val);
         bool del(const std::vector<uint8_t>& key);
+        bool update(InsertReq* req); // set() per req->mode; false, writing nothing, if the mode isn't met
+        bool del(DeleteReq* req); // del() that also reports the removed value; false, writing nothing, if absent
         BIter seek(const std::vector<uint8_t>& key, CMP cmp) const; // invalidated by any later set()/del()
 
     private:

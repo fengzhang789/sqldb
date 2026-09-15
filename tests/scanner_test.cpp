@@ -96,8 +96,8 @@ namespace {
         }
 
         // Scans users_, checking every row is intact, and returns the ids in scan order.
-        Ids scan_ids(CMP cmp1, int64_t key1, CMP cmp2, int64_t key2) {
-            Scanner sc(cmp1, cmp2, pk(key1), pk(key2));
+        Ids scan_ids(CMP cmp1, Record key1, CMP cmp2, Record key2) {
+            Scanner sc(cmp1, cmp2, std::move(key1), std::move(key2));
             std::string err;
             EXPECT_TRUE(db_scan(kv_.get(), users_, &sc, &err)) << err;
 
@@ -109,6 +109,10 @@ namespace {
                 EXPECT_EQ(rec.get("name")->str, name_for(ids.back()));
             }
             return ids;
+        }
+
+        Ids scan_ids(CMP cmp1, int64_t key1, CMP cmp2, int64_t key2) {
+            return scan_ids(cmp1, pk(key1), cmp2, pk(key2));
         }
 
         std::string path_;
@@ -196,6 +200,24 @@ TEST_F(ScannerTest, WhenScanningEveryBoundPairInEitherDirectionThenRowsMatchTheR
 }
 
 // ============================================================================
+// Empty bounds: a full table scan
+// ============================================================================
+TEST_F(ScannerTest, WhenABoundIsEmptyThenItStandsForTheEndOfTheTable) {
+    insert_rows();
+    Ids ascending = all_ids();
+    EXPECT_EQ(scan_ids(CMP_GE, Record{}, CMP_LE, Record{}), ascending);
+    EXPECT_EQ(scan_ids(CMP_LE, Record{}, CMP_GE, Record{}), Ids(ascending.rbegin(), ascending.rend()));
+    EXPECT_EQ(scan_ids(CMP_GE, Record{}, CMP_LE, pk(-96)), (Ids{-100, -98, -96}));
+    EXPECT_EQ(scan_ids(CMP_LE, Record{}, CMP_GT, pk(96)), (Ids{100, 98}));
+}
+
+TEST_F(ScannerTest, WhenAnExclusiveStartBoundIsEmptyThenScanIsEmpty) {
+    insert_rows();
+    EXPECT_TRUE(scan_ids(CMP_GT, Record{}, CMP_LE, Record{}).empty());
+    EXPECT_TRUE(scan_ids(CMP_LT, Record{}, CMP_GE, Record{}).empty());
+}
+
+// ============================================================================
 // Empty results
 // ============================================================================
 TEST_F(ScannerTest, WhenRangeLiesStrictlyBetweenTwoAdjacentRowsThenScanIsEmpty) {
@@ -247,14 +269,16 @@ TEST_F(ScannerTest, WhenCmp1AndCmp2PointTheSameWayThenDbScanFailsAndLeavesTheSca
     }
 }
 
-TEST_F(ScannerTest, WhenABoundIsNotExactlyThePrimaryKeyThenDbScanFails) {
+TEST_F(ScannerTest, WhenABoundIsNotAPrimaryKeyPrefixThenDbScanFails) {
     insert_rows();
     Record wrong_type;
     wrong_type.add_str("id", "0");
     Record extra_col = pk(0);
     extra_col.add_str("name", "x");
+    Record non_key;
+    non_key.add_str("name", "x");
 
-    for (const Record& bad : {Record{}, wrong_type, extra_col}) {
+    for (const Record& bad : {wrong_type, extra_col, non_key}) {
         for (bool bad_start : {true, false}) {
             Scanner sc(CMP_GE, CMP_LE, bad_start ? bad : pk(0), bad_start ? pk(10) : bad);
             std::string err;
@@ -333,10 +357,23 @@ TEST_F(ScannerTest, WhenPrimaryKeyIsCompositeThenRowsSortByEachColumnInTurn) {
     EXPECT_EQ(scan_c(CMP_GE, key("x", I64_MIN), CMP_LE, key("x", I64_MAX)), (Ids{1, 2}));
     EXPECT_EQ(scan_c(CMP_LE, key("x", I64_MAX), CMP_GE, key("x", I64_MIN)), (Ids{2, 1}));
 
+    // A bound naming only a is padded past every b for GT/LE, so it covers all of a's rows.
+    auto a_only = [](const std::string& a) {
+        Record rec;
+        rec.add_str("a", a);
+        return rec;
+    };
+    EXPECT_EQ(scan_c(CMP_GE, a_only("x"), CMP_LE, a_only("x")), (Ids{1, 2}));
+    EXPECT_EQ(scan_c(CMP_GT, a_only("x"), CMP_LT, a_only("y")), (Ids{3, 4}));
+    EXPECT_EQ(scan_c(CMP_LE, a_only("x"), CMP_GE, a_only("")), (Ids{2, 1, 0}));
+
     Record rec;
     rec.add_int64("b", 5).add_str("a", "x"); // pk columns out of tdef order
     std::string err;
-    ASSERT_TRUE(db_get(kv_.get(), pairs, &rec, &err)) << err;
+    Scanner out_of_order(CMP_GE, CMP_LE, rec, rec);
+    EXPECT_FALSE(db_scan(kv_.get(), pairs, &out_of_order, &err)); // scan bounds follow the index's column order...
+    err.clear();
+    ASSERT_TRUE(db_get(kv_.get(), pairs, &rec, &err)) << err; // ...but db_get takes pk columns in any order
     EXPECT_EQ(rec.cols, (std::vector<std::string>{"a", "b", "c"}));
     EXPECT_EQ(rec.get("c")->int64, 2);
 }

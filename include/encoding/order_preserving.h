@@ -15,7 +15,8 @@ void encode_int64(std::string* out, int64_t v);
 int64_t decode_int64(const std::string& data, size_t* pos);
 
 // 0x00 -> 0x01 0x01 and 0x01 -> 0x01 0x02, so escaped strings contain no 0x00 byte.
-// This is needed so that 0x00 does not terminate a string early
+// This is needed so that 0x00 does not terminate a string early.
+// A leading 0xfe/0xff also gets a 0xfe prefix, so no encoding starts with 0xff: it's reserved as a max sentinel.
 std::string escape_string(const std::string& s);
 std::string unescape_string(const std::string& s);
 

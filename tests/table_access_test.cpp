@@ -157,3 +157,69 @@ TEST_F(TableAccessTest, WhenMultipleRowsExistThenEachIsIndependentlyAddressable)
     EXPECT_EQ(r1.get("name")->str, "alice");
     EXPECT_EQ(r2.get("name")->str, "bob");
 }
+
+TEST_F(TableAccessTest, WhenDbGetIsGivenANonPrimaryKeyColumnThenItFailsWithAnError) {
+    std::string err;
+    ASSERT_TRUE(db_update(kv_.get(), tdef_, full_row(1, "alice", 30), UpdateMode::UPSERT, &err)) << err;
+
+    Record rec = pk_only(1);
+    rec.add_str("name", "alice");
+    EXPECT_FALSE(db_get(kv_.get(), tdef_, &rec, &err));
+    EXPECT_FALSE(err.empty());
+}
+
+// ============================================================================
+// find_index / is_prefix
+// ============================================================================
+namespace {
+    // Indexes as table_new would normalize them: (a, b, id), (a, id), (c, id).
+    TableDef indexed_table() {
+        return TableDefBuilder("t")
+            .add_col("id", INT_64)
+            .add_col("a", BYTES)
+            .add_col("b", INT_64)
+            .add_col("c", BYTES)
+            .set_pkeys(1)
+            .add_index({"a", "b", "id"})
+            .add_index({"a", "id"})
+            .add_index({"c", "id"})
+            .build();
+    }
+}
+
+TEST(FindIndexTest, WhenKeysArePrimaryKeyPrefixThenFindIndexReturnsMinusOne) {
+    TableDef tdef = indexed_table();
+    std::string err;
+    EXPECT_EQ(find_index(tdef, {}, &err), -1); // a full scan
+    EXPECT_EQ(find_index(tdef, {"id"}, &err), -1);
+    EXPECT_TRUE(err.empty());
+}
+
+TEST(FindIndexTest, WhenSeveralIndexesStartWithKeysThenFindIndexPicksTheShortest) {
+    TableDef tdef = indexed_table();
+    std::string err;
+    EXPECT_EQ(find_index(tdef, {"a"}, &err), 1);
+    EXPECT_EQ(find_index(tdef, {"a", "b"}, &err), 0);
+    EXPECT_EQ(find_index(tdef, {"c", "id"}, &err), 2);
+    EXPECT_TRUE(err.empty());
+}
+
+TEST(FindIndexTest, WhenNothingStartsWithKeysThenFindIndexReturnsMinusTwoWithAnError) {
+    TableDef tdef = indexed_table();
+    const std::vector<std::string> cases[] = {{"b"}, {"id", "a"}, {"b", "a"}, {"a", "c"}, {"a", "b", "id", "c"}};
+    for (const auto& keys : cases) {
+        std::string err;
+        EXPECT_EQ(find_index(tdef, keys, &err), -2) << keys.size();
+        EXPECT_FALSE(err.empty());
+    }
+}
+
+TEST(IsPrefixTest, WhenShortColsMatchTheStartOfLongColsThenIsPrefixIsTrue) {
+    const std::vector<std::string> cols = {"a", "b", "c"};
+    EXPECT_TRUE(is_prefix(cols, std::vector<std::string>{}));
+    EXPECT_TRUE(is_prefix(cols, std::vector<std::string>{"a", "b"}));
+    EXPECT_TRUE(is_prefix(cols, cols));
+    EXPECT_FALSE(is_prefix(cols, std::vector<std::string>{"b"}));
+    EXPECT_FALSE(is_prefix(cols, std::vector<std::string>{"a", "c"}));
+    EXPECT_FALSE(is_prefix(cols, std::vector<std::string>{"a", "b", "c", "d"}));
+}

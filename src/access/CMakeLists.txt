@@ -1,5 +1,6 @@
-# Library containing row-level encode/decode, point query/insert/update/delete, and range scans.
+# Library containing row-level encode/decode, point query/insert/update/delete, range scans and secondary indexes.
 add_library(access
+    index_ops.cpp
     row_codec.cpp
     scanner.cpp
     table_access.cpp

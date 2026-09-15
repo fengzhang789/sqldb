@@ -86,7 +86,7 @@ namespace {
 
     // Short strings over the escaped bytes and their neighbours, so shared prefixes and ties are common.
     std::string random_bytes(std::mt19937_64& rng) {
-        const char alphabet[] = {'\x00', '\x01', '\x02', 'a', '\xff'};
+        const char alphabet[] = {'\x00', '\x01', '\x02', 'a', '\xfe', '\xff'};
         std::string s(rng() % 5, '\0');
         for (char& c : s) {
             c = alphabet[rng() % std::size(alphabet)];
@@ -170,12 +170,33 @@ TEST(EscapeStringTest, WhenStringHasZeroOrOneBytesThenOnlyThoseAreEscaped) {
     }
 }
 
+TEST(EscapeStringTest, WhenStringStartsWithFeOrFfThenAnFePrefixIsAdded) {
+    struct Case {
+        std::string raw, escaped;
+    };
+    const Case cases[] = {
+        {"\xfd", "\xfd"},
+        {"\xfe", "\xfe\xfe"},
+        {"\xff", "\xfe\xff"},
+        {"\xff\xff", "\xfe\xff\xff"},
+        {"a\xff", "a\xff"},
+        {std::string{'\xff', '\x00'}, std::string{'\xfe', '\xff', '\x01', '\x01'}},
+    };
+    for (const Case& c : cases) {
+        EXPECT_EQ(escape_string(c.raw), c.escaped);
+        EXPECT_EQ(unescape_string(c.escaped), c.raw);
+    }
+}
+
 TEST(UnescapeStringTest, WhenEscapeSequenceIsMalformedThenUnescapeStringThrows) {
     const std::string malformed[] = {
         std::string{'\x01'},
         std::string{'a', '\x01'},
         std::string{'\x01', '\x00'},
         std::string{'\x01', '\x03'},
+        std::string{'\xff'},
+        std::string{'\xfe'},
+        std::string{'\xfe', 'a'},
     };
     for (const std::string& s : malformed) {
         EXPECT_THROW(unescape_string(s), std::invalid_argument);
@@ -207,11 +228,29 @@ TEST(EncodeBytesTest, WhenSortedStringsAreEncodedThenEncodingsAreSorted) {
         std::string{'a', '\x00', 'b'},
         std::string{'a', '\x01'},
         "ab",
+        "\xfd\xff",
+        "\xfe",
+        std::string{'\xfe', '\x00'},
+        "\xfe\xff",
         "\xff",
+        std::string{'\xff', '\x00'},
+        "\xff\xff",
     };
     for (size_t i = 1; i < std::size(sorted); ++i) {
         ASSERT_LT(compare_bytes(sorted[i - 1], sorted[i]), 0) << "table must be sorted at " << i;
         EXPECT_LT(enc_bytes(sorted[i - 1]), enc_bytes(sorted[i])) << "at " << i;
+    }
+}
+
+TEST(EncodeBytesTest, WhenBytesAreEncodedThenNoEncodingStartsWithFf) {
+    EXPECT_NE(static_cast<uint8_t>(enc_bytes("")[0]), 0xff);
+    for (int first = 0; first <= 0xff; ++first) {
+        const std::string raw{static_cast<char>(first), '\xff'};
+        std::string encoded = enc_bytes(raw);
+        EXPECT_NE(static_cast<uint8_t>(encoded[0]), 0xff) << "first byte " << first;
+
+        size_t pos = 0;
+        EXPECT_EQ(decode_bytes(encoded, &pos), raw);
     }
 }
 

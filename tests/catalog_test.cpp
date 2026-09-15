@@ -75,6 +75,62 @@ TEST(TableDefBuilderTest, WhenPrefixIsNotSetThenItDefaultsToZero) {
     EXPECT_EQ(def.prefix, 0u);
 }
 
+TEST(TableDefBuilderTest, WhenAddIndexIsCalledThenIndexesKeepTheDeclaredColumnsWithoutPrefixes) {
+    TableDef def = TableDefBuilder("t").add_col("id", INT_64).add_col("a", BYTES).add_col("b", INT_64)
+        .set_pkeys(1).add_index({"b", "a"}).add_index({"a"}).build();
+
+    EXPECT_EQ(def.indexes, (std::vector<std::vector<std::string>>{{"b", "a"}, {"a"}}));
+    EXPECT_TRUE(def.index_prefixes.empty());
+}
+
+// ============================================================================
+// col_index / check_index_keys / table_def_check
+// ============================================================================
+TEST(ColIndexTest, WhenAColumnExistsThenColIndexReturnsItsPositionElseMinusOne) {
+    TableDef def = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).build();
+    EXPECT_EQ(col_index(def, "id"), 0);
+    EXPECT_EQ(col_index(def, "name"), 1);
+    EXPECT_EQ(col_index(def, "nope"), -1);
+}
+
+TEST(CheckIndexKeysTest, WhenAnIndexLacksPrimaryKeyColumnsThenCheckIndexKeysAppendsThemInPkOrder) {
+    TableDef def = TableDefBuilder("t").add_col("a", BYTES).add_col("b", INT_64).add_col("c", BYTES)
+        .add_col("d", INT_64).set_pkeys(2).build();
+    std::vector<std::string> out;
+    std::string err;
+
+    ASSERT_TRUE(check_index_keys(def, {"c"}, &out, &err)) << err;
+    EXPECT_EQ(out, (std::vector<std::string>{"c", "a", "b"}));
+
+    ASSERT_TRUE(check_index_keys(def, {"d", "b"}, &out, &err)) << err;
+    EXPECT_EQ(out, (std::vector<std::string>{"d", "b", "a"})); // b is already there
+}
+
+TEST(CheckIndexKeysTest, WhenAnIndexIsInvalidThenCheckIndexKeysFails) {
+    TableDef def = TableDefBuilder("t").add_col("a", BYTES).add_col("b", INT_64).add_col("c", BYTES)
+        .add_col("d", INT_64).set_pkeys(2).build();
+    const std::vector<std::string> bad[] = {
+        {},
+        {"nope"},
+        {"c", "c"},
+        {"c", "d"}, // plus the pk, covers every column
+    };
+    for (const auto& index : bad) {
+        std::vector<std::string> out;
+        std::string err;
+        EXPECT_FALSE(check_index_keys(def, index, &out, &err)) << index.size();
+        EXPECT_FALSE(err.empty());
+    }
+}
+
+TEST(TableDefCheckTest, WhenIndexesAreValidThenTableDefCheckNormalizesEachInPlace) {
+    TableDef def = TableDefBuilder("t").add_col("id", INT_64).add_col("a", BYTES).add_col("b", INT_64)
+        .set_pkeys(1).add_index({"a"}).add_index({"b"}).build();
+    std::string err;
+    ASSERT_TRUE(table_def_check(&def, &err)) << err;
+    EXPECT_EQ(def.indexes, (std::vector<std::vector<std::string>>{{"a", "id"}, {"b", "id"}}));
+}
+
 // ============================================================================
 // Catalog::table_new
 // ============================================================================
@@ -162,4 +218,68 @@ TEST_F(CatalogTest, WhenANewCatalogReadsTheSameKvThenTheTableDefSurvives) {
     EXPECT_EQ(d->name, "t");
     EXPECT_EQ(d->pkeys, 1);
     EXPECT_EQ(d->prefix, TABLE_PREFIX_MIN);
+}
+
+// ============================================================================
+// Catalog::table_new with secondary indexes
+// ============================================================================
+TEST_F(CatalogTest, WhenATableHasIndexesThenEachIndexGetsTheNextPrefixAfterTheTables) {
+    Catalog catalog(kv_.get());
+    std::string err;
+    TableDef users = TableDefBuilder("users").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
+        .set_pkeys(1).add_index({"name"}).add_index({"age"}).build();
+    TableDef next = TableDefBuilder("next").add_col("id", INT_64).set_pkeys(1).build();
+    ASSERT_TRUE(catalog.table_new(users, &err)) << err;
+    ASSERT_TRUE(catalog.table_new(next, &err)) << err;
+
+    const TableDef* u = catalog.get_table_def("users");
+    const TableDef* n = catalog.get_table_def("next");
+    ASSERT_NE(u, nullptr);
+    ASSERT_NE(n, nullptr);
+    EXPECT_EQ(u->prefix, TABLE_PREFIX_MIN);
+    EXPECT_EQ(u->index_prefixes, (std::vector<uint32_t>{TABLE_PREFIX_MIN + 1, TABLE_PREFIX_MIN + 2}));
+    EXPECT_EQ(n->prefix, TABLE_PREFIX_MIN + 3);
+    EXPECT_TRUE(n->index_prefixes.empty());
+}
+
+TEST_F(CatalogTest, WhenATableWithIndexesIsReopenedThenItsNormalizedIndexesAndPrefixesSurvive) {
+    std::string err;
+    {
+        Catalog catalog(kv_.get());
+        TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
+            .add_col("bio", BYTES).set_pkeys(1).add_index({"name"}).add_index({"age", "name"}).build();
+        ASSERT_TRUE(catalog.table_new(t, &err)) << err;
+    }
+
+    Catalog reopened(kv_.get());
+    const TableDef* d = reopened.get_table_def("t");
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->cols, (std::vector<std::string>{"id", "name", "age", "bio"}));
+    EXPECT_EQ(d->indexes, (std::vector<std::vector<std::string>>{{"name", "id"}, {"age", "name", "id"}}));
+    EXPECT_EQ(d->index_prefixes, (std::vector<uint32_t>{TABLE_PREFIX_MIN + 1, TABLE_PREFIX_MIN + 2}));
+}
+
+TEST_F(CatalogTest, WhenAnIndexIsInvalidThenTableNewFailsWithoutAllocatingAPrefix) {
+    Catalog catalog(kv_.get());
+    std::string err;
+    TableDef bad = TableDefBuilder("bad").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
+        .set_pkeys(1).add_index({"missing"}).build();
+    EXPECT_FALSE(catalog.table_new(bad, &err));
+    EXPECT_FALSE(err.empty());
+    EXPECT_EQ(catalog.get_table_def("bad"), nullptr);
+
+    err.clear();
+    TableDef good = TableDefBuilder("good").add_col("id", INT_64).set_pkeys(1).build();
+    ASSERT_TRUE(catalog.table_new(good, &err)) << err;
+    EXPECT_EQ(catalog.get_table_def("good")->prefix, TABLE_PREFIX_MIN);
+}
+
+TEST_F(CatalogTest, WhenTheCallerSetsIndexPrefixesThenTableNewFails) {
+    Catalog catalog(kv_.get());
+    std::string err;
+    TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
+        .set_pkeys(1).add_index({"name"}).build();
+    t.index_prefixes = {42};
+    EXPECT_FALSE(catalog.table_new(t, &err));
+    EXPECT_FALSE(err.empty());
 }

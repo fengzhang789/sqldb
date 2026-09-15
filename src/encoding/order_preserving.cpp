@@ -27,7 +27,10 @@ int64_t decode_int64(const std::string& data, size_t* pos) {
 
 std::string escape_string(const std::string& s) {
     std::string out;
-    out.reserve(s.size());
+    out.reserve(s.size() + 1);
+    if (!s.empty() && static_cast<uint8_t>(s[0]) >= 0xfe) {
+        out.push_back('\xfe');
+    }
     for (char c : s) {
         if (static_cast<uint8_t>(c) <= 0x01) {
             out.push_back('\x01');
@@ -42,7 +45,14 @@ std::string escape_string(const std::string& s) {
 std::string unescape_string(const std::string& s) {
     std::string out;
     out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
+    size_t i = 0;
+    if (!s.empty() && static_cast<uint8_t>(s[0]) >= 0xfe) {
+        if (s[0] != '\xfe' || s.size() < 2 || static_cast<uint8_t>(s[1]) < 0xfe) {
+            throw std::invalid_argument("order_preserving: bad escape sequence");
+        }
+        i = 1; // skip the 0xfe prefix
+    }
+    for (; i < s.size(); ++i) {
         if (s[i] != '\x01') {
             out.push_back(s[i]);
             continue;
