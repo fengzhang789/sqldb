@@ -107,8 +107,9 @@ uint64_t PageManager::append_page() {
     return ptr;
 }
 
-void PageManager::release_freed_pages() {
-    free_.release_pending();
+void PageManager::set_versions(uint64_t version, uint64_t min_reader) {
+    free_.version = version;
+    free_.min_reader = min_reader;
 }
 
 void PageManager::revert(uint64_t flushed_pages, const FreeListState& free_state) {

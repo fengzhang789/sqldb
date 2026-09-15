@@ -26,7 +26,7 @@ struct IPageManager {
 // written more than once and the buffered pages are keyed by page number
 // rather than forming an append queue. Reuse stays crash-safe because a page
 // is only reusable once an update that no longer references it is durable
-// (release_freed_pages()).
+// (set_versions()).
 //
 // Ptr 0 is never handed out: it's reserved for the file's meta page (page 0),
 // keeping it distinct from BTree's root == 0 "empty tree" sentinel. Page 1 is
@@ -49,7 +49,7 @@ class PageManager : public IPageManager, private IFreeListPages {
         void del(uint64_t ptr) override; // hand the page to the free list
 
         void write_pages(); // write the pages buffered by this update
-        void release_freed_pages(); // the last update is durable: its freed pages are reusable
+        void set_versions(uint64_t version, uint64_t min_reader); // for the free list, see FreeList::version
 
         uint64_t flushed_pages() const { return page_flushed_; }
         const FreeListState& free_state() const { return free_.state(); }

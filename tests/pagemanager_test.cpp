@@ -45,8 +45,15 @@ namespace {
             std::filesystem::remove(path_);
         }
 
+        // Ends an update durably with no reader open, as KV::commit does: every page freed so far becomes reusable.
+        void release_freed_pages(PageManager& pages) {
+            ++version_;
+            pages.set_versions(version_, version_);
+        }
+
         std::string path_;
         int fd_ = -1;
+        uint64_t version_ = 0;
     };
 }
 
@@ -168,7 +175,7 @@ TEST_F(PageManagerTest, WhenAFreedPageIsReleasedThenNewPageReusesIt) {
 
     pages.del(freed);
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
 
     EXPECT_EQ(pages.new_page(make_leaf(bytes("b"), bytes("2"))), freed);
 }
@@ -187,14 +194,14 @@ TEST_F(PageManagerTest, WhenPagesAreReusedThenTheFileStopsGrowing) {
     PageManager pages(fd_);
     uint64_t ptr = pages.new_page(make_leaf(bytes("a"), bytes("1")));
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
 
     uintmax_t size_after_warmup = 0;
     for (int i = 0; i < 10; ++i) {
         pages.del(ptr);
         ptr = pages.new_page(make_leaf(bytes("k"), bytes("v" + std::to_string(i))));
         pages.write_pages();
-        pages.release_freed_pages();
+        release_freed_pages(pages);
         if (i == 0) {
             size_after_warmup = std::filesystem::file_size(path_); // the 1st update still appends
         }
@@ -209,10 +216,10 @@ TEST_F(PageManagerTest, WhenAReusedPageIsWrittenThenItsNewContentIsOnDisk) {
     PageManager pages(fd_);
     uint64_t ptr = pages.new_page(make_leaf(bytes("old"), bytes("1")));
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
 
     pages.del(ptr);
-    pages.release_freed_pages();
+    release_freed_pages(pages);
     ASSERT_EQ(pages.new_page(make_leaf(bytes("new"), bytes("2"))), ptr);
     pages.write_pages();
     uint64_t flushed = pages.flushed_pages();
@@ -239,7 +246,7 @@ TEST_F(PageManagerTest, WhenAnUpdateIsRevertedThenItsFreedPageIsLiveAgain) {
     PageManager pages(fd_);
     uint64_t ptr = pages.new_page(make_leaf(bytes("a"), bytes("1")));
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
     uint64_t flushed = pages.flushed_pages();
     FreeListState committed = pages.free_state();
 
@@ -263,7 +270,7 @@ TEST_F(PageManagerTest, WhenReopenedThenPagesFreedBeforeAreStillReused) {
         freed = pages.new_page(make_leaf(bytes("a"), bytes("1")));
         pages.new_page(make_leaf(bytes("b"), bytes("2")));
         pages.write_pages();
-        pages.release_freed_pages();
+        release_freed_pages(pages);
 
         pages.del(freed);
         pages.write_pages();
@@ -272,6 +279,7 @@ TEST_F(PageManagerTest, WhenReopenedThenPagesFreedBeforeAreStillReused) {
     }
 
     PageManager reopened(fd_, flushed, free_state);
+    release_freed_pages(reopened); // KV restores a version past the update that freed it
     EXPECT_EQ(reopened.new_page(make_leaf(bytes("c"), bytes("3"))), freed);
 }
 
@@ -283,13 +291,13 @@ TEST_F(PageManagerTest, WhenMorePagesAreFreedThanOneNodeHoldsThenNoneIsLost) {
         ptrs.push_back(pages.new_page(make_leaf(bytes("k"), bytes("v"))));
     }
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
 
     for (uint64_t ptr : ptrs) {
         pages.del(ptr);
     }
     pages.write_pages();
-    pages.release_freed_pages();
+    release_freed_pages(pages);
     uint64_t flushed_before = pages.flushed_pages();
 
     // Every freed page comes back before the file has to grow again.

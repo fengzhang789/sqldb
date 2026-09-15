@@ -60,8 +60,8 @@ struct KVTX {
 // Two phase commit: new B+tree pages are fsynced before the root is fsynced
 // to make the whole transaction atomic.
 // Pages dropped by an update are recycled through a free list (see freelist.h)
-// whose position is committed in the meta page with the tree root, so a page is
-// only reused once the version referencing it has been replaced.
+// whose position is committed in the meta page with the tree root and version,
+// so a page is only reused once the version referencing it is durably replaced.
 // Note: single-process sequential access
 struct KV {
     public:
@@ -85,6 +85,8 @@ struct KV {
 
         int fd_ = -1;
         BTree tree_;
+        uint64_t version_ = 0; // commits so far; the running update's freed pages are recorded with it
+        uint64_t durable_version_ = 0; // version_ as of the last meta page known to be durable
 
         std::optional<PageManager> pages_; // backs BTree pages with the on-disk file
 

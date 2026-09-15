@@ -1,10 +1,10 @@
 // Meta page (page 0) layout:
-// +-----------+----------+---------------+-----------+----------+-----------+----------+---------+
-// | signature | root ptr | flushed pages | head page | head seq | tail page | tail seq | unused  |
-// |   (16B)   |   (8B)   |     (8B)      |   (8B)    |   (8B)   |   (8B)    |   (8B)   | (bytes) |
-// +-----------+----------+---------------+-----------+----------+-----------+----------+---------+
-// The last 4 fields are the free list's position (see freelist.h); committing
-// them with the tree root is what makes page reuse crash-safe.
+// +-----------+----------+---------------+-----------+----------+-----------+----------+---------+---------+
+// | signature | root ptr | flushed pages | head page | head seq | tail page | tail seq | version | unused  |
+// |   (16B)   |   (8B)   |     (8B)      |   (8B)    |   (8B)   |   (8B)    |   (8B)   |  (8B)   | (bytes) |
+// +-----------+----------+---------------+-----------+----------+-----------+----------+---------+---------+
+// The head/tail fields are the free list's position (see freelist.h), and version is the commit count its items are
+// recorded with; committing them with the tree root is what makes page reuse crash-safe.
 // Updated via a single pwrite() at offset 0, which is expected to be
 // power-loss-atomic since it's page-aligned and touches a single sector.
 
@@ -29,6 +29,7 @@ namespace {
         META_HEAD_SEQ,
         META_TAIL_PAGE,
         META_TAIL_SEQ,
+        META_VERSION,
         META_FIELD_COUNT,
     };
     constexpr size_t META_DATA_SIZE = META_SIG_SIZE + META_FIELD_COUNT * 8;
@@ -55,6 +56,7 @@ namespace {
         uint64_t root = 0;
         uint64_t flushed = 0;
         FreeListState free_state;
+        uint64_t version = 0;
     };
 
     Meta parse_meta(const std::vector<uint8_t>& data) {
@@ -65,6 +67,7 @@ namespace {
         meta.free_state.head_seq = read_u64(data.data() + meta_offset(META_HEAD_SEQ));
         meta.free_state.tail_page = read_u64(data.data() + meta_offset(META_TAIL_PAGE));
         meta.free_state.tail_seq = read_u64(data.data() + meta_offset(META_TAIL_SEQ));
+        meta.version = read_u64(data.data() + meta_offset(META_VERSION));
         return meta;
     }
 }
@@ -172,6 +175,7 @@ std::vector<uint8_t> KV::save_meta() const {
     write_u64(data.data() + meta_offset(META_HEAD_SEQ), fl.head_seq);
     write_u64(data.data() + meta_offset(META_TAIL_PAGE), fl.tail_page);
     write_u64(data.data() + meta_offset(META_TAIL_SEQ), fl.tail_seq);
+    write_u64(data.data() + meta_offset(META_VERSION), version_);
     return data;
 }
 
@@ -212,6 +216,8 @@ void KV::read_root() {
 
     pages_.emplace(fd_, meta.flushed, meta.free_state);
     tree_.root = meta.root;
+    version_ = meta.version;
+    durable_version_ = meta.version;
 }
 
 void KV::update_root() {
@@ -227,6 +233,8 @@ void KV::begin(KVTX* tx) {
     tx->root_ = tree_.root;
     tx->flushed_ = pages_->flushed_pages();
     tx->free_state_ = pages_->free_state();
+    // Pages freed since the last durable meta page may still be in the tree the file points at.
+    pages_->set_versions(version_, durable_version_);
 }
 
 void KV::abort(KVTX* tx) {
@@ -255,6 +263,7 @@ void KV::commit(KVTX* tx) {
         abort(tx);
         throw;
     }
+    ++version_;
 
     // Phase 2 is not rolled back. Once the meta page write or its fsync fails, the file may hold either the old or the
     // new root, and reverting memory to the old version would let the next commit overwrite pages the new one uses.
@@ -264,5 +273,5 @@ void KV::commit(KVTX* tx) {
         throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
     }
     // This version is durable, so the pages it dropped can now be reused.
-    pages_->release_freed_pages();
+    durable_version_ = version_;
 }

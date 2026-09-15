@@ -9,12 +9,19 @@
 #include "storage/btree.h" // BTREE_PAGE_SIZE
 
 // Free list node layout (one page):
-// +--------+---------------+---------+
-// |  next  |   pointers    | unused  |
-// |  (8B)  |    (n * 8B)   | (bytes) |
-// +--------+---------------+---------+
+// +--------+----------------------------+---------+
+// |  next  |  (pointer, version) pairs  | unused  |
+// |  (8B)  |         (n * 16B)          | (bytes) |
+// +--------+----------------------------+---------+
+// Each version is the one that freed the page next to it.
 constexpr size_t FREE_LIST_HEADER = 8;
-constexpr size_t FREE_LIST_CAP = (BTREE_PAGE_SIZE - FREE_LIST_HEADER) / 8;
+constexpr size_t FREE_LIST_ITEM_SIZE = 16;
+constexpr size_t FREE_LIST_CAP = (BTREE_PAGE_SIZE - FREE_LIST_HEADER) / FREE_LIST_ITEM_SIZE;
+
+// Is version a older than b? Wraparound-safe: it compares the signed distance between them.
+constexpr bool version_before(uint64_t a, uint64_t b) {
+    return static_cast<int64_t>(a - b) < 0;
+}
 
 // LNodeT is a non-owning view of one free list node's page bytes: LNode over a
 // writable page, ConstLNode over a read-only one. The page must outlive it.
@@ -31,6 +38,7 @@ class LNodeT {
 
         uint64_t next() const { return load(0); }
         uint64_t get_ptr(size_t idx) const { return load(slot(idx)); }
+        uint64_t get_version(size_t idx) const { return load(slot(idx) + 8); }
 
         void set_next(uint64_t ptr)
             requires(!std::is_const_v<Byte>)
@@ -44,10 +52,16 @@ class LNodeT {
             store(slot(idx), ptr);
         }
 
+        void set_version(size_t idx, uint64_t version)
+            requires(!std::is_const_v<Byte>)
+        {
+            store(slot(idx) + 8, version);
+        }
+
     private:
         static size_t slot(size_t idx) {
             assert(idx < FREE_LIST_CAP);
-            return FREE_LIST_HEADER + idx * 8;
+            return FREE_LIST_HEADER + idx * FREE_LIST_ITEM_SIZE;
         }
 
         uint64_t load(size_t offset) const {
@@ -96,18 +110,22 @@ struct IFreeListPages {
 // taken from itself before resorting to appending, and a node it drains is
 // given back to itself.
 //
-// A page freed during an update still belongs to the committed version of the
-// tree, so pushed items are only handed back out once release_pending() marks
-// that update durable.
+// Each item records the version that freed it. A page freed at version v is
+// still part of v's tree, which a reader of v or older, or a meta page that
+// isn't durably replaced yet, may still use, so it is only handed back out
+// once min_reader has moved past v. Versions never decrease, so the list is in
+// version order and pop only has to check the head.
 class FreeList {
     public:
         FreeList(IFreeListPages* pages, const FreeListState& state);
 
+        uint64_t version = 0; // the running update's version, recorded with each page it frees
+        uint64_t min_reader = 0; // pages freed before this version are reusable; must not be past `version`
+
         uint64_t pop_head(); // take a reusable page, or 0 if there is none
         void push_tail(uint64_t ptr); // hand a freed page over for later reuse
 
-        void release_pending(); // make items added since the last call reusable
-        void revert(const FreeListState& state); // roll back to a saved state, releasing nothing
+        void revert(const FreeListState& state); // roll back to a saved state
 
         const FreeListState& state() const { return state_; }
 
@@ -120,8 +138,8 @@ class FreeList {
         };
 
         Popped pop(); // take an item without recycling the drained head node
+        void append_item(uint64_t ptr); // write (ptr, version) at the tail slot, which must exist
 
         IFreeListPages* pages_;
         FreeListState state_;
-        uint64_t max_seq_; // items at or past this seq are not reusable yet
 };
