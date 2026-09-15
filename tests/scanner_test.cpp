@@ -62,9 +62,19 @@ namespace {
             std::filesystem::remove(path_);
         }
 
+        // Runs one access call in its own committed transaction, as each call was durable on its own before ch. 11.
+        template <typename Fn, typename... Args>
+        bool in_tx(Fn fn, Args&&... args) {
+            KVTX tx;
+            kv_->begin(&tx);
+            bool ok = fn(&tx, std::forward<Args>(args)...);
+            kv_->commit(&tx);
+            return ok;
+        }
+
         void upsert(const TableDef& tdef, const Record& rec) {
             std::string err;
-            ASSERT_TRUE(db_update(kv_.get(), tdef, rec, UpdateMode::UPSERT, &err)) << err;
+            ASSERT_TRUE(in_tx(db_update, tdef, rec, UpdateMode::UPSERT, &err)) << err;
         }
 
         void upsert_id(const TableDef& tdef, int64_t id, const std::string& name) {
@@ -97,9 +107,11 @@ namespace {
 
         // Scans users_, checking every row is intact, and returns the ids in scan order.
         Ids scan_ids(CMP cmp1, Record key1, CMP cmp2, Record key2) {
+            KVTX tx;
+            kv_->begin(&tx);
             Scanner sc(cmp1, cmp2, std::move(key1), std::move(key2));
             std::string err;
-            EXPECT_TRUE(db_scan(kv_.get(), users_, &sc, &err)) << err;
+            EXPECT_TRUE(db_scan(&tx, users_, &sc, &err)) << err;
 
             Ids ids;
             for (; sc.valid(); sc.next()) {
@@ -108,6 +120,7 @@ namespace {
                 ids.push_back(rec.get("id")->int64);
                 EXPECT_EQ(rec.get("name")->str, name_for(ids.back()));
             }
+            kv_->commit(&tx);
             return ids;
         }
 
@@ -254,19 +267,22 @@ TEST_F(ScannerTest, WhenTableHasNoRowsThenScanIsEmpty) {
 // ============================================================================
 TEST_F(ScannerTest, WhenCmp1AndCmp2PointTheSameWayThenDbScanFailsAndLeavesTheScannerInvalid) {
     insert_rows();
+    KVTX tx;
+    kv_->begin(&tx);
     Scanner sc(CMP_GE, CMP_LE, pk(0), pk(10));
     std::string err;
-    ASSERT_TRUE(db_scan(kv_.get(), users_, &sc, &err)) << err;
+    ASSERT_TRUE(db_scan(&tx, users_, &sc, &err)) << err;
     ASSERT_TRUE(sc.valid());
 
     for (auto [cmp1, cmp2] : {std::pair{CMP_GE, CMP_GT}, std::pair{CMP_LE, CMP_LT}}) {
         sc.cmp1 = cmp1;
         sc.cmp2 = cmp2;
         err.clear();
-        EXPECT_FALSE(db_scan(kv_.get(), users_, &sc, &err));
+        EXPECT_FALSE(db_scan(&tx, users_, &sc, &err));
         EXPECT_FALSE(err.empty());
         EXPECT_FALSE(sc.valid());
     }
+    kv_->commit(&tx);
 }
 
 TEST_F(ScannerTest, WhenABoundIsNotAPrimaryKeyPrefixThenDbScanFails) {
@@ -282,7 +298,7 @@ TEST_F(ScannerTest, WhenABoundIsNotAPrimaryKeyPrefixThenDbScanFails) {
         for (bool bad_start : {true, false}) {
             Scanner sc(CMP_GE, CMP_LE, bad_start ? bad : pk(0), bad_start ? pk(10) : bad);
             std::string err;
-            EXPECT_FALSE(db_scan(kv_.get(), users_, &sc, &err));
+            EXPECT_FALSE(in_tx(db_scan, users_, &sc, &err));
             EXPECT_FALSE(err.empty());
             EXPECT_FALSE(sc.valid());
         }
@@ -297,7 +313,7 @@ TEST_F(ScannerTest, WhenDbGetHitsARowThenRecordHoldsTheFullRowInColumnOrder) {
     for (int64_t id : {-100, -2, 0, 100}) {
         Record rec = pk(id);
         std::string err;
-        ASSERT_TRUE(db_get(kv_.get(), users_, &rec, &err)) << "id " << id << ": " << err;
+        ASSERT_TRUE(in_tx(db_get,users_, &rec, &err)) << "id " << id << ": " << err;
         EXPECT_EQ(rec.cols, (std::vector<std::string>{"id", "name"}));
         EXPECT_EQ(rec.get("id")->int64, id);
         EXPECT_EQ(rec.get("name")->str, name_for(id));
@@ -310,7 +326,7 @@ TEST_F(ScannerTest, WhenDbGetTargetsAnAbsentKeyThenItReturnsFalseWithoutAnError)
     for (int64_t id : {int64_t{-101}, int64_t{-1}, int64_t{1}, int64_t{101}, I64_MIN, I64_MAX}) {
         Record rec = pk(id);
         std::string err;
-        EXPECT_FALSE(db_get(kv_.get(), users_, &rec, &err)) << "id " << id;
+        EXPECT_FALSE(in_tx(db_get,users_, &rec, &err)) << "id " << id;
         EXPECT_TRUE(err.empty());
     }
 }
@@ -340,15 +356,18 @@ TEST_F(ScannerTest, WhenPrimaryKeyIsCompositeThenRowsSortByEachColumnInTurn) {
     }
 
     auto scan_c = [&](CMP cmp1, Record key1, CMP cmp2, Record key2) {
+        KVTX tx;
+        kv_->begin(&tx);
         Scanner sc(cmp1, cmp2, std::move(key1), std::move(key2));
         std::string err;
-        EXPECT_TRUE(db_scan(kv_.get(), pairs, &sc, &err)) << err;
+        EXPECT_TRUE(db_scan(&tx, pairs, &sc, &err)) << err;
         Ids cs;
         for (; sc.valid(); sc.next()) {
             Record rec;
             sc.deref(&rec);
             cs.push_back(rec.get("c")->int64);
         }
+        kv_->commit(&tx);
         return cs;
     };
 
@@ -371,9 +390,9 @@ TEST_F(ScannerTest, WhenPrimaryKeyIsCompositeThenRowsSortByEachColumnInTurn) {
     rec.add_int64("b", 5).add_str("a", "x"); // pk columns out of tdef order
     std::string err;
     Scanner out_of_order(CMP_GE, CMP_LE, rec, rec);
-    EXPECT_FALSE(db_scan(kv_.get(), pairs, &out_of_order, &err)); // scan bounds follow the index's column order...
+    EXPECT_FALSE(in_tx(db_scan, pairs, &out_of_order, &err)); // scan bounds follow the index's column order...
     err.clear();
-    ASSERT_TRUE(db_get(kv_.get(), pairs, &rec, &err)) << err; // ...but db_get takes pk columns in any order
+    ASSERT_TRUE(in_tx(db_get,pairs, &rec, &err)) << err; // ...but db_get takes pk columns in any order
     EXPECT_EQ(rec.cols, (std::vector<std::string>{"a", "b", "c"}));
     EXPECT_EQ(rec.get("c")->int64, 2);
 }

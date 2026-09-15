@@ -145,7 +145,7 @@ namespace {
             std::filesystem::remove(path_);
             kv_ = std::make_unique<KV>(path_);
             kv_->open();
-            catalog_ = std::make_unique<Catalog>(kv_.get());
+            catalog_ = std::make_unique<Catalog>();
 
             TableDef def = TableDefBuilder("users")
                 .add_col("id", INT_64)
@@ -157,8 +157,11 @@ namespace {
                 .add_index({"city", "age"})
                 .build();
             std::string err;
-            ASSERT_TRUE(catalog_->table_new(def, &err)) << err;
-            users_ = catalog_->get_table_def("users");
+            KVTX tx;
+            kv_->begin(&tx);
+            ASSERT_TRUE(catalog_->table_new(&tx, def, &err)) << err;
+            users_ = catalog_->get_table_def(&tx, "users");
+            kv_->commit(&tx);
             ASSERT_NE(users_, nullptr);
         }
 
@@ -168,9 +171,19 @@ namespace {
             std::filesystem::remove(path_);
         }
 
+        // Runs one access call in its own committed transaction, as each call was durable on its own before ch. 11.
+        template <typename Fn, typename... Args>
+        bool in_tx(Fn fn, Args&&... args) {
+            KVTX tx;
+            kv_->begin(&tx);
+            bool ok = fn(&tx, std::forward<Args>(args)...);
+            kv_->commit(&tx);
+            return ok;
+        }
+
         void upsert(const Row& row) {
             std::string err;
-            ASSERT_TRUE(db_update(kv_.get(), *users_, to_record(row), UpdateMode::UPSERT, &err)) << err;
+            ASSERT_TRUE(in_tx(db_update, *users_, to_record(row), UpdateMode::UPSERT, &err)) << err;
         }
 
         // 72 rows inserted out of id order, so every age in 20..29 and every city repeats.
@@ -187,7 +200,9 @@ namespace {
         std::vector<std::string> index_keys(size_t index_no) {
             std::string prefix = encode_key(users_->index_prefixes[index_no], {});
             std::vector<std::string> keys;
-            for (BIter it = kv_->seek(std::vector<uint8_t>(prefix.begin(), prefix.end()), CMP_GE); it.valid(); it.next()) {
+            KVTX tx;
+            kv_->begin(&tx);
+            for (BIter it = tx.seek(std::vector<uint8_t>(prefix.begin(), prefix.end()), CMP_GE); it.valid(); it.next()) {
                 auto [key, val] = it.deref();
                 std::string k(key.begin(), key.end());
                 if (!k.starts_with(prefix)) {
@@ -196,6 +211,7 @@ namespace {
                 EXPECT_TRUE(val.empty());
                 keys.push_back(std::move(k));
             }
+            kv_->commit(&tx);
             return keys;
         }
 
@@ -218,9 +234,11 @@ namespace {
 
         // Scans users_, checking the chosen index and that every row comes back whole, in tdef column order.
         std::vector<Row> scan(CMP cmp1, const Record& key1, CMP cmp2, const Record& key2, int index_no) {
+            KVTX tx;
+            kv_->begin(&tx);
             Scanner sc(cmp1, cmp2, key1, key2);
             std::string err;
-            EXPECT_TRUE(db_scan(kv_.get(), *users_, &sc, &err)) << err;
+            EXPECT_TRUE(db_scan(&tx, *users_, &sc, &err)) << err;
             EXPECT_EQ(sc.index_no, index_no);
 
             std::vector<Row> rows;
@@ -230,6 +248,7 @@ namespace {
                 EXPECT_EQ(rec.cols, users_->cols);
                 rows.push_back(from_record(rec));
             }
+            kv_->commit(&tx);
             return rows;
         }
 
@@ -292,7 +311,7 @@ TEST_F(IndexTest, WhenARowIsDeletedThenItsIndexKeysAreRemoved) {
     upsert(bob);
 
     std::string err;
-    ASSERT_TRUE(db_delete(kv_.get(), *users_, id_key(1), &err)) << err;
+    ASSERT_TRUE(in_tx(db_delete,*users_, id_key(1), &err)) << err;
     expect_indexes_match({bob});
 }
 
@@ -301,9 +320,9 @@ TEST_F(IndexTest, WhenAWriteIsRejectedThenIndexesAreUntouched) {
     upsert(alice);
 
     std::string err;
-    EXPECT_FALSE(db_update(kv_.get(), *users_, to_record({1, "alice", 99, "la"}), UpdateMode::INSERT_ONLY, &err));
-    EXPECT_FALSE(db_update(kv_.get(), *users_, to_record({2, "bob", 25, "sf"}), UpdateMode::UPDATE_ONLY, &err));
-    EXPECT_FALSE(db_delete(kv_.get(), *users_, id_key(2), &err));
+    EXPECT_FALSE(in_tx(db_update,*users_, to_record({1, "alice", 99, "la"}), UpdateMode::INSERT_ONLY, &err));
+    EXPECT_FALSE(in_tx(db_update,*users_, to_record({2, "bob", 25, "sf"}), UpdateMode::UPDATE_ONLY, &err));
+    EXPECT_FALSE(in_tx(db_delete,*users_, id_key(2), &err));
     expect_indexes_match({alice});
 }
 
@@ -315,7 +334,7 @@ TEST_F(IndexTest, WhenARandomWorkloadRunsThenIndexesMatchTheLiveRows) {
         if (rng() % 4 == 0) {
             bool existed = live.erase(id) == 1;
             std::string err;
-            ASSERT_EQ(db_delete(kv_.get(), *users_, id_key(id), &err), existed) << "delete id " << id;
+            ASSERT_EQ(in_tx(db_delete,*users_, id_key(id), &err), existed) << "delete id " << id;
         } else {
             Row row{id, "user" + std::to_string(rng() % 3), 20 + static_cast<int64_t>(rng() % 5),
                     CITIES[rng() % CITIES.size()]};
@@ -397,7 +416,7 @@ TEST_F(IndexTest, WhenNoIndexStartsWithKey1ThenDbScanFails) {
     for (const Record& key : {name, age_city, city_id}) {
         Scanner sc(CMP_GE, CMP_LE, key, key);
         std::string err;
-        EXPECT_FALSE(db_scan(kv_.get(), *users_, &sc, &err)) << describe(key);
+        EXPECT_FALSE(in_tx(db_scan,*users_, &sc, &err)) << describe(key);
         EXPECT_FALSE(err.empty());
         EXPECT_FALSE(sc.valid());
     }
@@ -416,7 +435,7 @@ TEST_F(IndexTest, WhenABoundDoesNotFitTheIndexKey1PicksThenDbScanFails) {
     for (const auto& [key1, key2] : cases) {
         Scanner sc(CMP_GE, CMP_LE, key1, key2);
         std::string err;
-        EXPECT_FALSE(db_scan(kv_.get(), *users_, &sc, &err)) << describe(key1) << " " << describe(key2);
+        EXPECT_FALSE(in_tx(db_scan,*users_, &sc, &err)) << describe(key1) << " " << describe(key2);
         EXPECT_FALSE(err.empty());
         EXPECT_FALSE(sc.valid());
     }

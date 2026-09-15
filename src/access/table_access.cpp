@@ -13,18 +13,18 @@ namespace {
     }
 }
 
-bool db_get(KV* kv, const TableDef& tdef, Record* rec, std::string* err) {
+bool db_get(KVTX* tx, const TableDef& tdef, Record* rec, std::string* err) {
     Record key;
     if (!check_record(tdef, *rec, tdef.pkeys, &key.vals, err)) return false;
     key.cols.assign(tdef.cols.begin(), tdef.cols.begin() + tdef.pkeys); // db_scan wants the pk columns in order
 
     Scanner sc(CMP_GE, CMP_LE, key, key);
-    if (!db_scan(kv, tdef, &sc, err) || !sc.valid()) return false;
+    if (!db_scan(tx, tdef, &sc, err) || !sc.valid()) return false;
     sc.deref(rec);
     return true;
 }
 
-bool db_update(KV* kv, const TableDef& tdef, const Record& rec, UpdateMode mode, std::string* err) {
+bool db_update(KVTX* tx, const TableDef& tdef, const Record& rec, UpdateMode mode, std::string* err) {
     std::vector<Value> values;
     if (!check_record(tdef, rec, static_cast<int>(tdef.cols.size()), &values, err)) return false;
 
@@ -36,7 +36,7 @@ bool db_update(KV* kv, const TableDef& tdef, const Record& rec, UpdateMode mode,
     req.key = to_bytes(key);
     req.val = to_bytes(encode_values(col_values));
     req.mode = mode;
-    if (!kv->update(&req)) {
+    if (!tx->update(&req)) {
         *err = (req.added ? "row does not exist in table: " : "row already exists in table: ") + tdef.name;
         return false;
     }
@@ -45,25 +45,25 @@ bool db_update(KV* kv, const TableDef& tdef, const Record& rec, UpdateMode mode,
     if (!req.added) {
         Record old;
         decode_row(tdef, key, std::string(req.old.begin(), req.old.end()), &old);
-        index_op(kv, tdef, old, INDEX_DEL);
+        index_op(tx, tdef, old, INDEX_DEL);
     }
-    index_op(kv, tdef, rec, INDEX_ADD);
+    index_op(tx, tdef, rec, INDEX_ADD);
     return true;
 }
 
-bool db_delete(KV* kv, const TableDef& tdef, const Record& rec, std::string* err) {
+bool db_delete(KVTX* tx, const TableDef& tdef, const Record& rec, std::string* err) {
     std::vector<Value> pk_values;
     if (!check_record(tdef, rec, tdef.pkeys, &pk_values, err)) return false;
 
     std::string key = encode_key(tdef.prefix, pk_values);
     DeleteReq req;
     req.key = to_bytes(key);
-    if (!kv->del(&req)) return false;
+    if (!tx->del(&req)) return false;
 
     if (!tdef.indexes.empty()) {
         Record old;
         decode_row(tdef, key, std::string(req.old.begin(), req.old.end()), &old);
-        index_op(kv, tdef, old, INDEX_DEL);
+        index_op(tx, tdef, old, INDEX_DEL);
     }
     return true;
 }

@@ -331,6 +331,24 @@ TEST(FreeList, WhenAnUpdateIsRevertedThenItsPopAndPushAreUndone) {
     EXPECT_EQ(list.pop_head(), 0u);
 }
 
+TEST(FreeList, WhenRevertedToAStateWithUnreleasedItemsThenTheyStayUnreleased) {
+    FakePages pages;
+    FreeList list(&pages, kFreshList);
+    push_pages(list, 0, 2);
+    list.release_pending();
+
+    // A commit whose meta page write failed keeps its state, but not the right to reuse the page it freed: the file
+    // may still hold the previous version, which uses that page.
+    push_pages(list, 2, 1);
+    FreeListState unreleased = list.state();
+
+    // The next transaction takes a page, then aborts.
+    ASSERT_EQ(list.pop_head(), kFirstFreedPage + 0);
+    list.revert(unreleased);
+
+    EXPECT_EQ(pop_all(list), (std::vector<uint64_t>{kFirstFreedPage + 0, kFirstFreedPage + 1}));
+}
+
 // ============================================================================
 // FreeList: recirculation over many updates
 // ============================================================================

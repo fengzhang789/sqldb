@@ -63,7 +63,13 @@ add_executable(index_tests
 )
 target_link_libraries(index_tests PRIVATE access encoding catalog storage GTest::gtest_main)
 
+add_executable(db_tests
+    db_test.cpp
+)
+target_link_libraries(db_tests PRIVATE db_api GTest::gtest_main)
+
 include(GoogleTest)
+gtest_discover_tests(db_tests)
 gtest_discover_tests(btree_tests)
 gtest_discover_tests(btree_iter_tests)
 gtest_discover_tests(order_preserving_tests)

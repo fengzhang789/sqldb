@@ -87,18 +87,18 @@ bool table_def_check(TableDef* tdef, std::string* err) {
     return true;
 }
 
-std::optional<std::string> Catalog::internal_get(const TableDef& tdef, const std::string& pk) {
-    auto val = kv_->get(internal_key(tdef.prefix, pk));
+std::optional<std::string> Catalog::internal_get(KVTX* tx, const TableDef& tdef, const std::string& pk) {
+    auto val = tx->get(internal_key(tdef.prefix, pk));
     if (!val.has_value()) return std::nullopt;
     return std::string(val->begin(), val->end());
 }
 
-void Catalog::internal_set(const TableDef& tdef, const std::string& pk, const std::string& val) {
-    kv_->set(internal_key(tdef.prefix, pk), std::vector<uint8_t>(val.begin(), val.end()));
+void Catalog::internal_set(KVTX* tx, const TableDef& tdef, const std::string& pk, const std::string& val) {
+    tx->set(internal_key(tdef.prefix, pk), std::vector<uint8_t>(val.begin(), val.end()));
 }
 
-std::unique_ptr<TableDef> Catalog::get_table_def_from_kv(const std::string& name) {
-    auto encoded = internal_get(TDEF_TABLE, name);
+std::unique_ptr<TableDef> Catalog::get_table_def_from_kv(KVTX* tx, const std::string& name) {
+    auto encoded = internal_get(tx, TDEF_TABLE, name);
     if (!encoded.has_value()) return nullptr;
 
     auto def = std::make_unique<TableDef>();
@@ -106,11 +106,11 @@ std::unique_ptr<TableDef> Catalog::get_table_def_from_kv(const std::string& name
     return def;
 }
 
-const TableDef* Catalog::get_table_def(const std::string& name) {
+const TableDef* Catalog::get_table_def(KVTX* tx, const std::string& name) {
     auto it = cache_.find(name);
     if (it != cache_.end()) return it->second.get();
 
-    auto def = get_table_def_from_kv(name);
+    auto def = get_table_def_from_kv(tx, name);
     if (!def) return nullptr;
 
     const TableDef* ptr = def.get();
@@ -118,10 +118,14 @@ const TableDef* Catalog::get_table_def(const std::string& name) {
     return ptr;
 }
 
+void Catalog::clear_cache() {
+    cache_.clear();
+}
+
 // next_prefix is stored as a 4-byte big-endian uint32 under @meta["next_prefix"].
-uint32_t Catalog::alloc_prefix(uint32_t n) {
+uint32_t Catalog::alloc_prefix(KVTX* tx, uint32_t n) {
     uint32_t next = TABLE_PREFIX_MIN;
-    auto stored = internal_get(TDEF_META, "next_prefix");
+    auto stored = internal_get(tx, TDEF_META, "next_prefix");
     if (stored.has_value() && stored->size() == 4) {
         const auto& s = *stored;
         next = (static_cast<uint8_t>(s[0]) << 24) | (static_cast<uint8_t>(s[1]) << 16) |
@@ -134,28 +138,28 @@ uint32_t Catalog::alloc_prefix(uint32_t n) {
     encoded[1] = static_cast<char>(following >> 16);
     encoded[2] = static_cast<char>(following >> 8);
     encoded[3] = static_cast<char>(following);
-    internal_set(TDEF_META, "next_prefix", encoded);
+    internal_set(tx, TDEF_META, "next_prefix", encoded);
 
     return next;
 }
 
-bool Catalog::table_new(TableDef def, std::string* err) {
+bool Catalog::table_new(KVTX* tx, TableDef def, std::string* err) {
     if (!table_def_check(&def, err)) return false;
     if (def.prefix != 0 || !def.index_prefixes.empty()) {
         *err = "prefixes must not be set by the caller";
         return false;
     }
 
-    if (internal_get(TDEF_TABLE, def.name).has_value()) {
+    if (internal_get(tx, TDEF_TABLE, def.name).has_value()) {
         *err = "table already exists: " + def.name;
         return false;
     }
 
     // One prefix for the table's rows, then one per index.
-    def.prefix = alloc_prefix(1 + static_cast<uint32_t>(def.indexes.size()));
+    def.prefix = alloc_prefix(tx, 1 + static_cast<uint32_t>(def.indexes.size()));
     for (size_t i = 0; i < def.indexes.size(); ++i) {
         def.index_prefixes.push_back(def.prefix + 1 + static_cast<uint32_t>(i));
     }
-    internal_set(TDEF_TABLE, def.name, encode_table_def(def));
+    internal_set(tx, TDEF_TABLE, def.name, encode_table_def(def));
     return true;
 }

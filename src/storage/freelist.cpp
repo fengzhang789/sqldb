@@ -1,5 +1,7 @@
 #include "storage/freelist.h"
 
+#include <algorithm>
+
 namespace {
     size_t seq_to_idx(uint64_t seq) {
         return static_cast<size_t>(seq % FREE_LIST_CAP);
@@ -65,7 +67,9 @@ void FreeList::release_pending() {
     max_seq_ = state_.tail_seq;
 }
 
+// Items pushed before `state` but not released yet stay unreleased: a commit that failed after writing its pages keeps
+// its state, yet the file may still hold the previous version, which uses the pages that commit freed.
 void FreeList::revert(const FreeListState& state) {
     state_ = state;
-    max_seq_ = state.tail_seq;
+    max_seq_ = std::min(max_seq_, state.tail_seq);
 }

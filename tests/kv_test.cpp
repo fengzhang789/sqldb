@@ -1,10 +1,12 @@
 #include "storage/kv.h"
 
 #include <sys/resource.h>
+#include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <random>
@@ -78,6 +80,60 @@ namespace {
         void (*old_handler_)(int);
     };
 
+    std::string file_contents(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+
+    // The live tree root, through the pointer every BIter keeps to its tree.
+    uint64_t live_root(const KVTX& tx) {
+        return tx.seek(bytes("key"), CMP_GE).tree->root;
+    }
+
+    // The pre-transaction KV API, for the tests of per-update behavior: each call runs in its own transaction.
+    struct AutoCommitKV : KV {
+        using KV::KV;
+
+        std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) {
+            KVTX tx;
+            begin(&tx);
+            std::optional<std::vector<uint8_t>> val = tx.get(key);
+            commit(&tx);
+            return val;
+        }
+
+        void set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+            KVTX tx;
+            begin(&tx);
+            tx.set(key, val);
+            commit(&tx);
+        }
+
+        bool del(const std::vector<uint8_t>& key) {
+            KVTX tx;
+            begin(&tx);
+            bool deleted = tx.del(key);
+            commit(&tx);
+            return deleted;
+        }
+
+        bool update(InsertReq* req) {
+            KVTX tx;
+            begin(&tx);
+            bool updated = tx.update(req);
+            commit(&tx);
+            return updated;
+        }
+
+        bool del(DeleteReq* req) {
+            KVTX tx;
+            begin(&tx);
+            bool deleted = tx.del(req);
+            commit(&tx);
+            return deleted;
+        }
+    };
+
     class KVTest : public ::testing::Test {
     protected:
         void SetUp() override {
@@ -97,7 +153,7 @@ namespace {
 }
 
 TEST_F(KVTest, WhenKeyMissingThenGetReturnsNullopt) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_EQ(db.get(bytes("missing")), std::nullopt);
 }
@@ -105,7 +161,7 @@ TEST_F(KVTest, WhenKeyMissingThenGetReturnsNullopt) {
 TEST_F(KVTest, OpenCreatesTheFileIfItDoesNotExist) {
     ASSERT_FALSE(std::filesystem::exists(path_));
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
 
     EXPECT_TRUE(std::filesystem::exists(path_));
@@ -114,14 +170,14 @@ TEST_F(KVTest, OpenCreatesTheFileIfItDoesNotExist) {
 TEST_F(KVTest, OpenSucceedsOnAnAlreadyExistingFile) {
     uintmax_t size_before;
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.set(bytes("key"), bytes("value"));
         db.close();
         size_before = std::filesystem::file_size(path_);
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     EXPECT_NO_THROW(db.open());
     // The existing file must not be truncated by opening it.
     EXPECT_EQ(std::filesystem::file_size(path_), size_before);
@@ -133,14 +189,14 @@ TEST_F(KVTest, OpenThrowsWhenParentDirectoryDoesNotExist) {
 }
 
 TEST_F(KVTest, SetThenGetReturnsTheValue) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("key"), bytes("value"));
     EXPECT_EQ(db.get(bytes("key")), bytes("value"));
 }
 
 TEST_F(KVTest, SetThenDelRemovesTheKey) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("key"), bytes("value"));
     EXPECT_TRUE(db.del(bytes("key")));
@@ -148,7 +204,7 @@ TEST_F(KVTest, SetThenDelRemovesTheKey) {
 }
 
 TEST_F(KVTest, DelOnMissingKeyReturnsFalse) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_FALSE(db.del(bytes("missing")));
 }
@@ -157,7 +213,7 @@ TEST_F(KVTest, DelOnMissingKeyReturnsFalse) {
 // InsertReq / DeleteReq
 // ============================================================================
 TEST_F(KVTest, WhenUpdateInsertsANewKeyThenAddedIsTrueAndOldIsEmpty) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     InsertReq req{bytes("key"), bytes("value")};
     req.old = bytes("stale");
@@ -169,7 +225,7 @@ TEST_F(KVTest, WhenUpdateInsertsANewKeyThenAddedIsTrueAndOldIsEmpty) {
 }
 
 TEST_F(KVTest, WhenUpdateOverwritesAKeyThenOldHoldsThePreviousValue) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("key"), bytes("v1"));
     InsertReq req{bytes("key"), bytes("v2")};
@@ -181,7 +237,7 @@ TEST_F(KVTest, WhenUpdateOverwritesAKeyThenOldHoldsThePreviousValue) {
 }
 
 TEST_F(KVTest, WhenTheUpdateModeIsNotMetThenUpdateReturnsFalseWithoutWriting) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("key"), bytes("v1"));
     uint64_t root = read_meta_field(path_, kMetaRoot);
@@ -198,7 +254,7 @@ TEST_F(KVTest, WhenTheUpdateModeIsNotMetThenUpdateReturnsFalseWithoutWriting) {
 }
 
 TEST_F(KVTest, WhenDelReqRemovesAKeyThenOldHoldsTheRemovedValue) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("key"), bytes("value"));
     DeleteReq req{bytes("key")};
@@ -214,14 +270,14 @@ TEST_F(KVTest, WhenDelReqRemovesAKeyThenOldHoldsTheRemovedValue) {
 
 TEST_F(KVTest, DataSurvivesCloseAndReopen) {
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.set(bytes("a"), bytes("1"));
         db.set(bytes("b"), bytes("2"));
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_EQ(db.get(bytes("a")), bytes("1"));
     EXPECT_EQ(db.get(bytes("b")), bytes("2"));
@@ -230,7 +286,7 @@ TEST_F(KVTest, DataSurvivesCloseAndReopen) {
 TEST_F(KVTest, ManyKeysSurviveCloseAndReopen) {
     constexpr int kCount = 200;
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         for (int i = 0; i < kCount; ++i) {
             db.set(bytes("key" + std::to_string(i)), bytes("value" + std::to_string(i)));
@@ -238,7 +294,7 @@ TEST_F(KVTest, ManyKeysSurviveCloseAndReopen) {
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     for (int i = 0; i < kCount; ++i) {
         EXPECT_EQ(db.get(bytes("key" + std::to_string(i))), bytes("value" + std::to_string(i)));
@@ -247,7 +303,7 @@ TEST_F(KVTest, ManyKeysSurviveCloseAndReopen) {
 
 TEST_F(KVTest, DeletesSurviveCloseAndReopen) {
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.set(bytes("a"), bytes("1"));
         db.set(bytes("b"), bytes("2"));
@@ -255,7 +311,7 @@ TEST_F(KVTest, DeletesSurviveCloseAndReopen) {
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_EQ(db.get(bytes("a")), std::nullopt);
     EXPECT_EQ(db.get(bytes("b")), bytes("2"));
@@ -263,12 +319,12 @@ TEST_F(KVTest, DeletesSurviveCloseAndReopen) {
 
 TEST_F(KVTest, ReopeningAnEmptyTreeStillFindsNothing) {
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_EQ(db.get(bytes("anything")), std::nullopt);
 }
@@ -280,7 +336,7 @@ TEST_F(KVTest, OpenThrowsOnBadSignature) {
         f.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     EXPECT_THROW(db.open(), std::runtime_error);
 }
 
@@ -290,12 +346,12 @@ TEST_F(KVTest, OpenThrowsWhenFileIsTooSmallForAMetaPage) {
         f << "DB"; // shorter than the meta page's fields
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     EXPECT_THROW(db.open(), std::runtime_error);
 }
 
 TEST_F(KVTest, SetThrowsWhenTheWriteFails) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
 
@@ -304,7 +360,7 @@ TEST_F(KVTest, SetThrowsWhenTheWriteFails) {
 }
 
 TEST_F(KVTest, ReadAfterAFailedSetBehavesAsIfNothingHappened) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
 
@@ -318,7 +374,7 @@ TEST_F(KVTest, ReadAfterAFailedSetBehavesAsIfNothingHappened) {
 }
 
 TEST_F(KVTest, ReadAfterAFailedDelBehavesAsIfNothingHappened) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
     db.set(bytes("b"), bytes("2"));
@@ -335,7 +391,7 @@ TEST_F(KVTest, ReadAfterAFailedDelBehavesAsIfNothingHappened) {
 }
 
 TEST_F(KVTest, UpdateFailsAgainWhileTheErrorPersists) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
 
@@ -349,7 +405,7 @@ TEST_F(KVTest, UpdateFailsAgainWhileTheErrorPersists) {
 }
 
 TEST_F(KVTest, RecoversOnceATemporaryWriteErrorIsResolved) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
 
@@ -358,8 +414,8 @@ TEST_F(KVTest, RecoversOnceATemporaryWriteErrorIsResolved) {
         EXPECT_THROW(db.set(bytes("b"), bytes("2")), std::runtime_error);
     }
 
-    // The limit is lifted: the next update recovers, first repairing the
-    // on-disk meta page left in an unknown state by the earlier failure.
+    // The limit is lifted: the failed commit never reached the meta page and
+    // was rolled back, so the next update commits on top of the last one.
     EXPECT_NO_THROW(db.set(bytes("b"), bytes("2")));
     EXPECT_EQ(db.get(bytes("a")), bytes("1"));
     EXPECT_EQ(db.get(bytes("b")), bytes("2"));
@@ -369,7 +425,7 @@ TEST_F(KVTest, RecoversOnceATemporaryWriteErrorIsResolved) {
 // Page reuse
 // ============================================================================
 TEST_F(KVTest, WhenUpdatesRunThenTheMetaPageRecordsTheFreeListPosition) {
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     db.set(bytes("a"), bytes("1"));
 
@@ -390,7 +446,7 @@ TEST_F(KVTest, WhenUpdatesRunThenTheMetaPageRecordsTheFreeListPosition) {
 
 TEST_F(KVTest, WhenTheMetaPageHasNoFreeListNodeThenOpenThrows) {
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.set(bytes("a"), bytes("1"));
         db.close();
@@ -403,7 +459,7 @@ TEST_F(KVTest, WhenTheMetaPageHasNoFreeListNodeThenOpenThrows) {
     f.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
     f.close();
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     EXPECT_THROW(db.open(), std::runtime_error);
 }
 
@@ -411,7 +467,7 @@ TEST_F(KVTest, WhenAKeyIsOverwrittenManyTimesThenTheFileStopsGrowing) {
     constexpr int kWarmup = 20;
     constexpr int kCount = 2000;
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     for (int i = 0; i < kWarmup; ++i) {
         db.set(bytes("key"), value(i));
@@ -431,7 +487,7 @@ TEST_F(KVTest, WhenAKeyIsOverwrittenManyTimesThenTheFileStopsGrowing) {
 TEST_F(KVTest, WhenKeysAreReinsertedAfterDeletesThenTheFileDoesNotGrow) {
     constexpr int kCount = 300;
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     uintmax_t baseline = 0;
     for (int round = 0; round < 3; ++round) {
@@ -453,7 +509,7 @@ TEST_F(KVTest, WhenKeysAreReinsertedAfterDeletesThenTheFileDoesNotGrow) {
 TEST_F(KVTest, WhenDeletedPagesAreReusedThenTheDeletedKeysStayGone) {
     constexpr int kCount = 200;
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     for (int i = 0; i < kCount; ++i) {
         db.set(key(i), value(i));
@@ -480,7 +536,7 @@ TEST_F(KVTest, WhenDeletedPagesAreReusedThenTheDeletedKeysStayGone) {
 TEST_F(KVTest, WhenReopenedThenPagesFreedBeforeTheCloseAreStillReused) {
     constexpr int kCount = 100;
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         for (int i = 0; i < kCount; ++i) {
             db.set(key(i), value(i));
@@ -491,7 +547,7 @@ TEST_F(KVTest, WhenReopenedThenPagesFreedBeforeTheCloseAreStillReused) {
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     uintmax_t pages_at_open = file_pages(path_);
 
@@ -511,7 +567,7 @@ TEST_F(KVTest, WhenReopenedThenPagesFreedBeforeTheCloseAreStillReused) {
 TEST_F(KVTest, WhenAnUpdateFailsAfterRewritingAFreeListNodeThenDataSurvives) {
     constexpr int kCount = 60;
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     for (int i = 0; i < kCount; ++i) {
         db.set(key(i), value(i));
@@ -535,7 +591,7 @@ TEST_F(KVTest, WhenAnUpdateFailsAfterRewritingAFreeListNodeThenDataSurvives) {
     db.set(bytes("zzz"), bytes("1")); // recovers
     db.close();
 
-    KV reopened(path_);
+    AutoCommitKV reopened(path_);
     reopened.open();
     EXPECT_EQ(reopened.get(bytes("zzz")), bytes("1"));
     for (int i = 0; i < kCount / 2; ++i) {
@@ -553,7 +609,7 @@ TEST_F(KVTest, WhenARandomWorkloadRunsAcrossReopensThenItMatchesAReferenceMap) {
     std::mt19937 rng(20250911);
 
     for (int session = 0; session < 4; ++session) {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         for (int op = 0; op < 500; ++op) {
             int k = static_cast<int>(rng() % 150);
@@ -572,7 +628,7 @@ TEST_F(KVTest, WhenARandomWorkloadRunsAcrossReopensThenItMatchesAReferenceMap) {
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     for (const auto& [k, v] : model) {
         EXPECT_EQ(db.get(k), v);
@@ -586,7 +642,7 @@ TEST_F(KVTest, WhenARandomWorkloadRunsAcrossReopensThenItMatchesAReferenceMap) {
 
 TEST_F(KVTest, RecoveredDataSurvivesCloseAndReopen) {
     {
-        KV db(path_);
+        AutoCommitKV db(path_);
         db.open();
         db.set(bytes("a"), bytes("1"));
 
@@ -599,8 +655,252 @@ TEST_F(KVTest, RecoveredDataSurvivesCloseAndReopen) {
         db.close();
     }
 
-    KV db(path_);
+    AutoCommitKV db(path_);
     db.open();
     EXPECT_EQ(db.get(bytes("a")), bytes("1"));
     EXPECT_EQ(db.get(bytes("b")), bytes("2"));
+}
+
+// ============================================================================
+// Transactions
+// ============================================================================
+TEST_F(KVTest, WhenATransactionCommitsThenAReopenedKvSeesAllOfItsWrites) {
+    constexpr int kCount = 200;
+    {
+        KV db(path_);
+        db.open();
+        KVTX tx;
+        db.begin(&tx);
+        for (int i = 0; i < kCount; ++i) {
+            tx.set(key(i), value(i));
+        }
+        for (int i = 0; i < kCount; i += 2) {
+            ASSERT_TRUE(tx.del(key(i)));
+        }
+        InsertReq req{key(1), bytes("updated"), UpdateMode::UPDATE_ONLY};
+        ASSERT_TRUE(tx.update(&req));
+        db.commit(&tx);
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    KVTX tx;
+    db.begin(&tx);
+    EXPECT_EQ(tx.get(key(1)), bytes("updated"));
+    for (int i = 2; i < kCount; ++i) {
+        EXPECT_EQ(tx.get(key(i)), i % 2 == 0 ? std::nullopt : std::optional(value(i))) << "key " << i;
+    }
+    db.abort(&tx);
+}
+
+TEST_F(KVTest, WhenATransactionAbortsAfterManyWritesThenTheFileAndTheTreeAreUnchanged) {
+    constexpr int kCount = 100;
+    KV db(path_);
+    db.open();
+    KVTX setup;
+    db.begin(&setup);
+    for (int i = 0; i < kCount; ++i) {
+        setup.set(key(i), value(i));
+    }
+    db.commit(&setup);
+    const std::string before = file_contents(path_);
+
+    KVTX tx;
+    db.begin(&tx);
+    const uint64_t root = live_root(tx);
+    for (int i = 0; i < kCount; i += 2) {
+        ASSERT_TRUE(tx.del(key(i)));
+    }
+    for (int i = kCount; i < 3 * kCount; ++i) {
+        tx.set(key(i), value(i));
+    }
+    InsertReq update{key(1), bytes("updated"), UpdateMode::UPDATE_ONLY};
+    ASSERT_TRUE(tx.update(&update));
+    DeleteReq removal{key(3)};
+    ASSERT_TRUE(tx.del(&removal));
+    EXPECT_EQ(tx.get(key(0)), std::nullopt); // the tx reads its own writes
+    EXPECT_EQ(tx.get(key(1)), bytes("updated"));
+    db.abort(&tx);
+
+    EXPECT_EQ(file_contents(path_), before);
+    auto expect_original = [&](KV& kv) {
+        KVTX after;
+        kv.begin(&after);
+        EXPECT_EQ(live_root(after), root);
+        for (int i = 0; i < 3 * kCount; ++i) {
+            EXPECT_EQ(after.get(key(i)), i < kCount ? std::optional(value(i)) : std::nullopt) << "key " << i;
+        }
+        kv.abort(&after);
+    };
+    expect_original(db);
+    db.close();
+
+    KV reopened(path_);
+    reopened.open();
+    expect_original(reopened);
+}
+
+TEST_F(KVTest, WhenATransactionMakesNoWritesThenCommitLeavesTheFileUntouched) {
+    KV db(path_);
+    db.open();
+    KVTX setup;
+    db.begin(&setup);
+    setup.set(bytes("a"), bytes("1"));
+    db.commit(&setup);
+
+    // Backdate the file, so any write during the commit would move its mtime.
+    std::filesystem::last_write_time(path_, std::filesystem::file_time_type::clock::now() - std::chrono::hours(24));
+    const std::filesystem::file_time_type mtime = std::filesystem::last_write_time(path_);
+    const std::string before = file_contents(path_);
+
+    KVTX tx;
+    db.begin(&tx);
+    EXPECT_EQ(tx.get(bytes("a")), bytes("1"));
+    EXPECT_TRUE(tx.seek(bytes("a"), CMP_GE).valid());
+    InsertReq insert{bytes("a"), bytes("2"), UpdateMode::INSERT_ONLY};
+    EXPECT_FALSE(tx.update(&insert)); // a rejected write changes nothing
+    EXPECT_FALSE(tx.del(bytes("missing")));
+    db.commit(&tx);
+
+    EXPECT_EQ(std::filesystem::last_write_time(path_), mtime);
+    EXPECT_EQ(file_contents(path_), before);
+
+    // The mtime check does catch a commit that writes.
+    KVTX write;
+    db.begin(&write);
+    write.set(bytes("b"), bytes("2"));
+    db.commit(&write);
+    EXPECT_NE(std::filesystem::last_write_time(path_), mtime);
+}
+
+TEST_F(KVTest, WhenWritingPagesFailsThenCommitRollsBackToTheRootAtBegin) {
+    constexpr int kCount = 50;
+    KV db(path_);
+    db.open();
+    KVTX setup;
+    db.begin(&setup);
+    for (int i = 0; i < kCount; ++i) {
+        setup.set(key(i), value(i));
+    }
+    db.commit(&setup);
+    const std::string meta_page = file_contents(path_).substr(0, BTREE_PAGE_SIZE);
+
+    KVTX tx;
+    db.begin(&tx);
+    const uint64_t root = live_root(tx);
+    for (int i = 0; i < kCount; i += 2) {
+        ASSERT_TRUE(tx.del(key(i)));
+    }
+    for (int i = kCount; i < 2 * kCount; ++i) {
+        tx.set(key(i), value(i));
+    }
+    ASSERT_NE(live_root(tx), root);
+    {
+        // Capped below the tree's pages, so writing any page of the tx fails.
+        ScopedFileSizeLimit limit(2 * BTREE_PAGE_SIZE);
+        EXPECT_THROW(db.commit(&tx), std::runtime_error);
+    }
+
+    EXPECT_EQ(file_contents(path_).substr(0, BTREE_PAGE_SIZE), meta_page);
+    KVTX after;
+    db.begin(&after);
+    EXPECT_EQ(live_root(after), root);
+    for (int i = 0; i < 2 * kCount; ++i) {
+        EXPECT_EQ(after.get(key(i)), i < kCount ? std::optional(value(i)) : std::nullopt) << "key " << i;
+    }
+
+    // With the error gone, a new transaction commits on top of the restored version.
+    for (int i = 0; i < kCount; i += 2) {
+        ASSERT_TRUE(after.del(key(i)));
+    }
+    db.commit(&after);
+    db.close();
+
+    KV reopened(path_);
+    reopened.open();
+    KVTX check;
+    reopened.begin(&check);
+    for (int i = 0; i < 2 * kCount; ++i) {
+        EXPECT_EQ(check.get(key(i)), i < kCount && i % 2 == 1 ? std::optional(value(i)) : std::nullopt) << "key " << i;
+    }
+    reopened.abort(&check);
+}
+
+TEST_F(KVTest, WhenWritesToANewFileAreAbortedThenALaterTransactionCanStillCommit) {
+    KV db(path_);
+    db.open();
+    KVTX aborted;
+    db.begin(&aborted);
+    aborted.set(bytes("a"), bytes("1"));
+    aborted.set(bytes("b"), bytes("2"));
+    db.abort(&aborted);
+    EXPECT_EQ(std::filesystem::file_size(path_), 0u);
+
+    // The 2nd set frees the 1st one's root, updating the free list node that a new file only has in memory.
+    KVTX tx;
+    db.begin(&tx);
+    tx.set(bytes("c"), bytes("3"));
+    tx.set(bytes("d"), bytes("4"));
+    db.commit(&tx);
+    db.close();
+
+    KV reopened(path_);
+    reopened.open();
+    KVTX check;
+    reopened.begin(&check);
+    EXPECT_EQ(check.get(bytes("a")), std::nullopt);
+    EXPECT_EQ(check.get(bytes("b")), std::nullopt);
+    EXPECT_EQ(check.get(bytes("c")), bytes("3"));
+    EXPECT_EQ(check.get(bytes("d")), bytes("4"));
+    reopened.abort(&check);
+}
+
+// Random transactions, each committed or aborted, checked against a std::map across reopens: an abort that missed any
+// page or free list change would let a later commit hand out a page that is still in use.
+TEST_F(KVTest, WhenRandomTransactionsCommitOrAbortThenOnlyTheCommittedWritesAreKept) {
+    std::map<std::vector<uint8_t>, std::vector<uint8_t>> model;
+    std::mt19937 rng(20260915);
+
+    auto expect_model = [&](KV& kv) {
+        KVTX tx;
+        kv.begin(&tx);
+        for (int k = 0; k < 150; ++k) {
+            auto it = model.find(key(k));
+            EXPECT_EQ(tx.get(key(k)), it == model.end() ? std::nullopt : std::optional(it->second)) << "key " << k;
+        }
+        kv.abort(&tx);
+    };
+
+    for (int session = 0; session < 3; ++session) {
+        KV db(path_);
+        db.open();
+        for (int t = 0; t < 100; ++t) {
+            std::map<std::vector<uint8_t>, std::vector<uint8_t>> pending = model;
+            KVTX tx;
+            db.begin(&tx);
+            for (int ops = 1 + static_cast<int>(rng() % 20); ops > 0; --ops) {
+                int k = static_cast<int>(rng() % 150);
+                if (rng() % 3 == 0) {
+                    ASSERT_EQ(tx.del(key(k)), pending.erase(key(k)) == 1) << "session " << session << ", key " << k;
+                } else {
+                    int v = static_cast<int>(rng() % 1000);
+                    tx.set(key(k), value(v));
+                    pending[key(k)] = value(v);
+                }
+            }
+            if (rng() % 2 == 0) {
+                db.commit(&tx);
+                model = std::move(pending);
+            } else {
+                db.abort(&tx);
+            }
+        }
+        expect_model(db);
+        db.close();
+    }
+
+    KV db(path_);
+    db.open();
+    expect_model(db);
 }

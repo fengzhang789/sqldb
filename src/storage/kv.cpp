@@ -18,7 +18,7 @@
 #include <stdexcept>
 
 namespace {
-    constexpr char DB_SIG[] = "DB"; // not compatible between chapters
+    constexpr char DB_SIG[] = "DB";
     constexpr size_t META_SIG_SIZE = 16;
 
     // The 8-byte fields following the signature, in order.
@@ -123,26 +123,21 @@ void KV::close() {
     pages_.reset();
 }
 
-// KV: public API
-std::optional<std::vector<uint8_t>> KV::get(const std::vector<uint8_t>& key) const {
-    return tree_.get(key);
+// KVTX: reads and writes on the live in-memory tree
+std::optional<std::vector<uint8_t>> KVTX::get(const std::vector<uint8_t>& key) const {
+    return kv_->tree_.get(key);
 }
 
-void KV::set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
-    std::vector<uint8_t> meta = save_meta();
-    tree_.insert(key, val); // throws (e.g. length limit) without mutating anything
-    update_or_revert(meta);
+void KVTX::set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
+    kv_->tree_.insert(key, val); // throws (e.g. length limit) without mutating anything
 }
 
-bool KV::del(const std::vector<uint8_t>& key) {
-    std::vector<uint8_t> meta = save_meta();
-    bool deleted = tree_.remove(key);
-    update_or_revert(meta);
-    return deleted;
+bool KVTX::del(const std::vector<uint8_t>& key) {
+    return kv_->tree_.remove(key);
 }
 
-bool KV::update(InsertReq* req) {
-    std::optional<std::vector<uint8_t>> old = tree_.get(req->key);
+bool KVTX::update(InsertReq* req) {
+    std::optional<std::vector<uint8_t>> old = kv_->tree_.get(req->key);
     req->added = !old.has_value();
     req->old = std::move(old).value_or(std::vector<uint8_t>{});
     if ((req->mode == UpdateMode::INSERT_ONLY && !req->added) || (req->mode == UpdateMode::UPDATE_ONLY && req->added)) {
@@ -152,8 +147,8 @@ bool KV::update(InsertReq* req) {
     return true;
 }
 
-bool KV::del(DeleteReq* req) {
-    std::optional<std::vector<uint8_t>> old = tree_.get(req->key);
+bool KVTX::del(DeleteReq* req) {
+    std::optional<std::vector<uint8_t>> old = kv_->tree_.get(req->key);
     if (!old.has_value()) {
         return false;
     }
@@ -161,8 +156,8 @@ bool KV::del(DeleteReq* req) {
     return del(req->key);
 }
 
-BIter KV::seek(const std::vector<uint8_t>& key, CMP cmp) const {
-    return tree_.seek(key, cmp);
+BIter KVTX::seek(const std::vector<uint8_t>& key, CMP cmp) const {
+    return kv_->tree_.seek(key, cmp);
 }
 
 // KV: meta page
@@ -219,65 +214,55 @@ void KV::read_root() {
     tree_.root = meta.root;
 }
 
-// Restores the tree root, the flushed-page count and the free list position
-// from previously-saved meta bytes, to revert a failed update.
-void KV::load_meta(const std::vector<uint8_t>& data) {
-    Meta meta = parse_meta(data);
-    tree_.root = meta.root;
-    pages_->revert(meta.flushed, meta.free_state);
-}
-
-void KV::write_meta_page(const std::vector<uint8_t>& data) {
+void KV::update_root() {
+    std::vector<uint8_t> data = save_meta();
     if (::pwrite(fd_, data.data(), data.size(), 0) != static_cast<ssize_t>(data.size())) {
         throw std::runtime_error(std::string("KV: write meta page failed: ") + std::strerror(errno));
     }
 }
 
-// KV: two-phase update
-void KV::update_root() {
-    write_meta_page(save_meta());
+// KV: transactions
+void KV::begin(KVTX* tx) {
+    tx->kv_ = this;
+    tx->root_ = tree_.root;
+    tx->flushed_ = pages_->flushed_pages();
+    tx->free_state_ = pages_->free_state();
 }
 
-void KV::update_file() {
-    pages_->write_pages();
-    if (::fsync(fd_) != 0) {
-        throw std::runtime_error("KV: fsync failed");
+void KV::abort(KVTX* tx) {
+    tree_.root = tx->root_;
+    if (tx->root_ == 0) {
+        pages_.emplace(fd_); // nothing committed yet: back to a new file, whose free list node is only buffered
+        return;
     }
+    pages_->revert(tx->flushed_, tx->free_state_);
+}
+
+// 2-phase commit. Phase 1 never overwrites a page the committed version uses (its tree pages are copy-on-write, and
+// free list nodes only change past the committed tail), so if phase 1 fails, the meta page on disk still points at an
+// intact tree and aborting tx is a complete rollback.
+void KV::commit(KVTX* tx) {
+    if (tree_.root == tx->root_) {
+        return; // no writes: each one moves the root to a newly allocated page
+    }
+
+    try {
+        pages_->write_pages();
+        if (::fsync(fd_) != 0) {
+            throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
+        }
+    } catch (...) {
+        abort(tx);
+        throw;
+    }
+
+    // Phase 2 is not rolled back. Once the meta page write or its fsync fails, the file may hold either the old or the
+    // new root, and reverting memory to the old version would let the next commit overwrite pages the new one uses.
+    // Keeping the new version is safe either way: its pages are durable, and the pages it freed stay unreleased.
     update_root();
     if (::fsync(fd_) != 0) {
-        throw std::runtime_error("KV: fsync failed");
+        throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
     }
     // This version is durable, so the pages it dropped can now be reused.
     pages_->release_freed_pages();
 }
-
-// 2-phase update with revert-on-failure. `meta` is the meta page as of
-// before this operation's tree mutation, i.e. the last known-good state.
-//
-// After an fsync failure, a filesystem's page cache can disagree with what's
-// actually on disk, so we don't trust re-reading the meta page to recover -
-// instead we revert the in-memory state immediately (reads keep working) and
-// mark failed_, since the on-disk meta page is now in an unknown state: it
-// may hold the old or the new root. The next update rewrites and fsyncs
-// `meta` first, restoring a known-good on-disk state before it proceeds -
-// only then is it safe to let new pages reuse the reverted page numbers.
-//
-// Reverting is enough even though a failed update rewrites pages in place:
-// every page it touched was free or unreferenced in `meta`'s version.
-void KV::update_or_revert(const std::vector<uint8_t>& meta) {
-    try {
-        if (failed_) {
-            write_meta_page(meta);
-            if (::fsync(fd_) != 0) {
-                throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
-            }
-            failed_ = false;
-        }
-        update_file();
-    } catch (...) {
-        load_meta(meta);
-        failed_ = true;
-        throw;
-    }
-}
-

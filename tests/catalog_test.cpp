@@ -25,6 +25,24 @@ namespace {
             std::filesystem::remove(path_);
         }
 
+        // Each helper runs one Catalog call in its own committed transaction, as each call was durable on its own
+        // before ch. 11.
+        bool table_new(Catalog* catalog, TableDef def, std::string* err) {
+            KVTX tx;
+            kv_->begin(&tx);
+            bool ok = catalog->table_new(&tx, std::move(def), err);
+            kv_->commit(&tx);
+            return ok;
+        }
+
+        const TableDef* get_table_def(Catalog* catalog, const std::string& name) {
+            KVTX tx;
+            kv_->begin(&tx);
+            const TableDef* tdef = catalog->get_table_def(&tx, name);
+            kv_->commit(&tx);
+            return tdef;
+        }
+
         std::string path_;
         std::unique_ptr<KV> kv_;
     };
@@ -135,20 +153,20 @@ TEST(TableDefCheckTest, WhenIndexesAreValidThenTableDefCheckNormalizesEachInPlac
 // Catalog::table_new
 // ============================================================================
 TEST_F(CatalogTest, WhenMultipleTablesAreCreatedThenPrefixesIncrease) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
 
     TableDef t1 = TableDefBuilder("t1").add_col("id", INT_64).set_pkeys(1).build();
     TableDef t2 = TableDefBuilder("t2").add_col("id", INT_64).set_pkeys(1).build();
     TableDef t3 = TableDefBuilder("t3").add_col("id", INT_64).set_pkeys(1).build();
 
-    ASSERT_TRUE(catalog.table_new(t1, &err)) << err;
-    ASSERT_TRUE(catalog.table_new(t2, &err)) << err;
-    ASSERT_TRUE(catalog.table_new(t3, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,t1, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,t2, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,t3, &err)) << err;
 
-    const TableDef* d1 = catalog.get_table_def("t1");
-    const TableDef* d2 = catalog.get_table_def("t2");
-    const TableDef* d3 = catalog.get_table_def("t3");
+    const TableDef* d1 = get_table_def(&catalog,"t1");
+    const TableDef* d2 = get_table_def(&catalog,"t2");
+    const TableDef* d3 = get_table_def(&catalog,"t3");
     ASSERT_NE(d1, nullptr);
     ASSERT_NE(d2, nullptr);
     ASSERT_NE(d3, nullptr);
@@ -159,45 +177,45 @@ TEST_F(CatalogTest, WhenMultipleTablesAreCreatedThenPrefixesIncrease) {
 }
 
 TEST_F(CatalogTest, WhenATableNameAlreadyExistsThenTableNewFails) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
 
     TableDef t1 = TableDefBuilder("dup").add_col("id", INT_64).set_pkeys(1).build();
-    ASSERT_TRUE(catalog.table_new(t1, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,t1, &err)) << err;
 
     TableDef t2 = TableDefBuilder("dup").add_col("id", INT_64).add_col("other", BYTES).set_pkeys(1).build();
-    EXPECT_FALSE(catalog.table_new(t2, &err));
+    EXPECT_FALSE(table_new(&catalog,t2, &err));
     EXPECT_FALSE(err.empty());
 }
 
 TEST_F(CatalogTest, WhenTheSchemaIsInvalidThenTableNewFails) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
 
     TableDef no_name = TableDefBuilder("").add_col("id", INT_64).set_pkeys(1).build();
-    EXPECT_FALSE(catalog.table_new(no_name, &err));
+    EXPECT_FALSE(table_new(&catalog,no_name, &err));
 
     TableDef no_pkeys;
     no_pkeys.name = "no_pkeys";
     no_pkeys.cols = {"a"};
     no_pkeys.types = {INT_64};
     no_pkeys.pkeys = 0;
-    EXPECT_FALSE(catalog.table_new(no_pkeys, &err));
+    EXPECT_FALSE(table_new(&catalog,no_pkeys, &err));
 }
 
 TEST_F(CatalogTest, WhenTheTableIsUnknownThenGetTableDefReturnsNullptr) {
-    Catalog catalog(kv_.get());
-    EXPECT_EQ(catalog.get_table_def("nope"), nullptr);
+    Catalog catalog;
+    EXPECT_EQ(get_table_def(&catalog,"nope"), nullptr);
 }
 
 TEST_F(CatalogTest, WhenGetTableDefIsCalledTwiceThenTheSecondCallHitsTheCache) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
     TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).set_pkeys(1).build();
-    ASSERT_TRUE(catalog.table_new(t, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,t, &err)) << err;
 
-    const TableDef* first = catalog.get_table_def("t");  // populates the cache
-    const TableDef* second = catalog.get_table_def("t");  // cache hit
+    const TableDef* first = get_table_def(&catalog,"t");  // populates the cache
+    const TableDef* second = get_table_def(&catalog,"t");  // cache hit
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(first, second);
     EXPECT_EQ(first->name, "t");
@@ -207,13 +225,13 @@ TEST_F(CatalogTest, WhenGetTableDefIsCalledTwiceThenTheSecondCallHitsTheCache) {
 TEST_F(CatalogTest, WhenANewCatalogReadsTheSameKvThenTheTableDefSurvives) {
     std::string err;
     {
-        Catalog catalog(kv_.get());
+        Catalog catalog;
         TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).set_pkeys(1).build();
-        ASSERT_TRUE(catalog.table_new(t, &err)) << err;
+        ASSERT_TRUE(table_new(&catalog,t, &err)) << err;
     }
 
-    Catalog reopened(kv_.get());
-    const TableDef* d = reopened.get_table_def("t");
+    Catalog reopened;
+    const TableDef* d = get_table_def(&reopened,"t");
     ASSERT_NE(d, nullptr);
     EXPECT_EQ(d->name, "t");
     EXPECT_EQ(d->pkeys, 1);
@@ -224,16 +242,16 @@ TEST_F(CatalogTest, WhenANewCatalogReadsTheSameKvThenTheTableDefSurvives) {
 // Catalog::table_new with secondary indexes
 // ============================================================================
 TEST_F(CatalogTest, WhenATableHasIndexesThenEachIndexGetsTheNextPrefixAfterTheTables) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
     TableDef users = TableDefBuilder("users").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
         .set_pkeys(1).add_index({"name"}).add_index({"age"}).build();
     TableDef next = TableDefBuilder("next").add_col("id", INT_64).set_pkeys(1).build();
-    ASSERT_TRUE(catalog.table_new(users, &err)) << err;
-    ASSERT_TRUE(catalog.table_new(next, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,users, &err)) << err;
+    ASSERT_TRUE(table_new(&catalog,next, &err)) << err;
 
-    const TableDef* u = catalog.get_table_def("users");
-    const TableDef* n = catalog.get_table_def("next");
+    const TableDef* u = get_table_def(&catalog,"users");
+    const TableDef* n = get_table_def(&catalog,"next");
     ASSERT_NE(u, nullptr);
     ASSERT_NE(n, nullptr);
     EXPECT_EQ(u->prefix, TABLE_PREFIX_MIN);
@@ -245,14 +263,14 @@ TEST_F(CatalogTest, WhenATableHasIndexesThenEachIndexGetsTheNextPrefixAfterTheTa
 TEST_F(CatalogTest, WhenATableWithIndexesIsReopenedThenItsNormalizedIndexesAndPrefixesSurvive) {
     std::string err;
     {
-        Catalog catalog(kv_.get());
+        Catalog catalog;
         TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
             .add_col("bio", BYTES).set_pkeys(1).add_index({"name"}).add_index({"age", "name"}).build();
-        ASSERT_TRUE(catalog.table_new(t, &err)) << err;
+        ASSERT_TRUE(table_new(&catalog,t, &err)) << err;
     }
 
-    Catalog reopened(kv_.get());
-    const TableDef* d = reopened.get_table_def("t");
+    Catalog reopened;
+    const TableDef* d = get_table_def(&reopened,"t");
     ASSERT_NE(d, nullptr);
     EXPECT_EQ(d->cols, (std::vector<std::string>{"id", "name", "age", "bio"}));
     EXPECT_EQ(d->indexes, (std::vector<std::vector<std::string>>{{"name", "id"}, {"age", "name", "id"}}));
@@ -260,26 +278,26 @@ TEST_F(CatalogTest, WhenATableWithIndexesIsReopenedThenItsNormalizedIndexesAndPr
 }
 
 TEST_F(CatalogTest, WhenAnIndexIsInvalidThenTableNewFailsWithoutAllocatingAPrefix) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
     TableDef bad = TableDefBuilder("bad").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
         .set_pkeys(1).add_index({"missing"}).build();
-    EXPECT_FALSE(catalog.table_new(bad, &err));
+    EXPECT_FALSE(table_new(&catalog,bad, &err));
     EXPECT_FALSE(err.empty());
-    EXPECT_EQ(catalog.get_table_def("bad"), nullptr);
+    EXPECT_EQ(get_table_def(&catalog,"bad"), nullptr);
 
     err.clear();
     TableDef good = TableDefBuilder("good").add_col("id", INT_64).set_pkeys(1).build();
-    ASSERT_TRUE(catalog.table_new(good, &err)) << err;
-    EXPECT_EQ(catalog.get_table_def("good")->prefix, TABLE_PREFIX_MIN);
+    ASSERT_TRUE(table_new(&catalog,good, &err)) << err;
+    EXPECT_EQ(get_table_def(&catalog,"good")->prefix, TABLE_PREFIX_MIN);
 }
 
 TEST_F(CatalogTest, WhenTheCallerSetsIndexPrefixesThenTableNewFails) {
-    Catalog catalog(kv_.get());
+    Catalog catalog;
     std::string err;
     TableDef t = TableDefBuilder("t").add_col("id", INT_64).add_col("name", BYTES).add_col("age", INT_64)
         .set_pkeys(1).add_index({"name"}).build();
     t.index_prefixes = {42};
-    EXPECT_FALSE(catalog.table_new(t, &err));
+    EXPECT_FALSE(table_new(&catalog,t, &err));
     EXPECT_FALSE(err.empty());
 }

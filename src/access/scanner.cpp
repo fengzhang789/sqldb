@@ -67,12 +67,12 @@ void Scanner::deref(Record* rec) const {
         row.vals.push_back(*v);
     }
     std::string err;
-    [[maybe_unused]] bool found = db_get(kv_, *tdef_, &row, &err);
+    [[maybe_unused]] bool found = db_get(tx_, *tdef_, &row, &err);
     assert(found && "index key without a matching row");
     *rec = std::move(row);
 }
 
-bool db_scan(KV* kv, const TableDef& tdef, Scanner* req, std::string* err) {
+bool db_scan(KVTX* tx, const TableDef& tdef, Scanner* req, std::string* err) {
     req->iter_ = BIter{}; // a failed scan leaves req invalid
     if (!(req->cmp1 > 0 && req->cmp2 < 0) && !(req->cmp1 < 0 && req->cmp2 > 0)) {
         *err = "bad range: cmp1 and cmp2 must point in opposite directions";
@@ -89,10 +89,10 @@ bool db_scan(KV* kv, const TableDef& tdef, Scanner* req, std::string* err) {
         return false;
     }
 
-    req->kv_ = kv;
+    req->tx_ = tx;
     req->tdef_ = &tdef;
     req->index_no = index_no;
     req->key_end_ = to_bytes(encode_key_partial(prefix, req->key2.vals, tdef, index_cols, req->cmp2));
-    req->iter_ = kv->seek(to_bytes(encode_key_partial(prefix, req->key1.vals, tdef, index_cols, req->cmp1)), req->cmp1);
+    req->iter_ = tx->seek(to_bytes(encode_key_partial(prefix, req->key1.vals, tdef, index_cols, req->cmp1)), req->cmp1);
     return true;
 }

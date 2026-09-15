@@ -107,7 +107,7 @@ class FreeList {
         void push_tail(uint64_t ptr); // hand a freed page over for later reuse
 
         void release_pending(); // make items added since the last call reusable
-        void revert(const FreeListState& state); // roll back to a persisted state
+        void revert(const FreeListState& state); // roll back to a saved state, releasing nothing
 
         const FreeListState& state() const { return state_; }
 
