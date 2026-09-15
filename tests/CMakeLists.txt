@@ -33,6 +33,11 @@ add_executable(freelist_tests
 )
 target_link_libraries(freelist_tests PRIVATE storage GTest::gtest_main)
 
+add_executable(reader_heap_tests
+    reader_heap_test.cpp
+)
+target_link_libraries(reader_heap_tests PRIVATE storage GTest::gtest_main)
+
 add_executable(catalog_tests
     catalog_test.cpp
 )
@@ -78,6 +83,7 @@ gtest_discover_tests(index_tests)
 gtest_discover_tests(kv_tests)
 gtest_discover_tests(pagemanager_tests)
 gtest_discover_tests(freelist_tests)
+gtest_discover_tests(reader_heap_tests)
 gtest_discover_tests(catalog_tests)
 gtest_discover_tests(row_codec_tests)
 gtest_discover_tests(table_access_tests)

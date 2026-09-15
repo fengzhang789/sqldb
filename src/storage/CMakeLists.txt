@@ -6,5 +6,6 @@ add_library(storage
     freelist.cpp
     kv.cpp
     pagemanager.cpp
+    reader_heap.cpp
 )
 target_include_directories(storage PUBLIC ${PROJECT_SOURCE_DIR}/include)
