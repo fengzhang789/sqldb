@@ -13,7 +13,7 @@ namespace {
     }
 }
 
-bool db_get(KVTX* tx, const TableDef& tdef, Record* rec, std::string* err) {
+bool db_get(KVReader* tx, const TableDef& tdef, Record* rec, std::string* err) {
     Record key;
     if (!check_record(tdef, *rec, tdef.pkeys, &key.vals, err)) return false;
     key.cols.assign(tdef.cols.begin(), tdef.cols.begin() + tdef.pkeys); // db_scan wants the pk columns in order

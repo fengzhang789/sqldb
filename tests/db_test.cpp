@@ -2,6 +2,7 @@
 
 #include <sys/resource.h>
 #include <algorithm>
+#include <atomic>
 #include <csignal>
 #include <cstdint>
 #include <filesystem>
@@ -12,6 +13,7 @@
 #include <ostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -157,8 +159,10 @@ namespace {
             db_->commit(&tx);
         }
 
-        // The rows between key1 and key2 (inclusive), sorted by id; key1's columns pick the index.
-        std::vector<Row> scan(DBTX* tx, const Record& key1, const Record& key2) {
+        // The rows between key1 and key2 (inclusive) that tx, a DBReader or a DBTX, sees, sorted by id; key1's columns
+        // pick the index.
+        template <typename Tx>
+        std::vector<Row> scan(Tx* tx, const Record& key1, const Record& key2) {
             Scanner sc(CMP_GE, CMP_LE, key1, key2);
             std::string err;
             EXPECT_TRUE(tx->scan("users", &sc, &err)) << err;
@@ -174,7 +178,8 @@ namespace {
         }
 
         // tx sees exactly `rows`, through the primary key and through each index alike.
-        void expect_rows(DBTX* tx, std::vector<Row> rows) {
+        template <typename Tx>
+        void expect_rows(Tx* tx, std::vector<Row> rows) {
             std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.id < b.id; });
             EXPECT_EQ(scan(tx, Record{}, Record{}), rows) << "primary key";
             EXPECT_EQ(scan(tx, age_key(I64_MIN), age_key(I64_MAX)), rows) << "(age, id) index";
@@ -182,10 +187,10 @@ namespace {
         }
 
         void expect_committed_rows(const std::vector<Row>& rows) {
-            DBTX tx;
-            db_->begin(&tx);
+            DBReader tx;
+            db_->begin_read(&tx);
             expect_rows(&tx, rows);
-            db_->abort(&tx);
+            db_->end_read(&tx);
         }
 
         std::string path_;
@@ -302,4 +307,107 @@ TEST_F(DBTest, WhenCommitFailsWritingPagesThenNeitherTheRowsNorTheirIndexKeysAre
     commit_rows({bob});
     reopen();
     expect_committed_rows({alice, bob});
+}
+
+TEST_F(DBTest, WhenACommitThatCreatedATableFailsThenLaterTransactionsCannotFindIt) {
+    TableDef pets = TableDefBuilder("pets").add_col("id", INT_64).add_col("name", BYTES).set_pkeys(1).build();
+    Record rex;
+    rex.add_int64("id", 1).add_str("name", "rex");
+
+    DBTX tx;
+    db_->begin(&tx);
+    std::string err;
+    EXPECT_TRUE(tx.table_new(pets, &err)) << err;
+    EXPECT_TRUE(tx.insert("pets", rex, &err)) << err; // caches the def this tx wrote
+    {
+        ScopedFileSizeLimit limit(2 * BTREE_PAGE_SIZE);
+        EXPECT_THROW(db_->commit(&tx), std::runtime_error);
+    }
+
+    DBTX next;
+    db_->begin(&next);
+    EXPECT_FALSE(next.insert("pets", rex, &err));
+    EXPECT_EQ(err, "table not found: pets");
+    db_->abort(&next);
+}
+
+// ============================================================================
+// Readers
+// ============================================================================
+TEST_F(DBTest, WhenAReaderBeganBeforeACommitThenItStillScansTheOldRowsThroughEachIndex) {
+    const Row alice{1, "alice", 30, "nyc"};
+    commit_rows({alice});
+    DBReader reader;
+    db_->begin_read(&reader);
+
+    DBTX tx;
+    db_->begin(&tx);
+    upsert(&tx, {1, "alice", 31, "la"});
+    insert(&tx, {2, "bob", 25, "sf"});
+    db_->commit(&tx);
+
+    expect_rows(&reader, {alice});
+    Record bob = id_key(2);
+    std::string err;
+    EXPECT_FALSE(reader.get("users", &bob, &err));
+    EXPECT_TRUE(err.empty());
+    db_->end_read(&reader);
+
+    expect_committed_rows({{1, "alice", 31, "la"}, {2, "bob", 25, "sf"}});
+}
+
+TEST_F(DBTest, WhenATableIsCreatedAfterAReaderBeganThenOnlyLaterReadersFindIt) {
+    TableDef pets = TableDefBuilder("pets").add_col("id", INT_64).add_col("name", BYTES).set_pkeys(1).build();
+    DBReader before;
+    db_->begin_read(&before);
+
+    DBTX tx;
+    db_->begin(&tx);
+    std::string err;
+    EXPECT_TRUE(tx.table_new(pets, &err)) << err;
+    Record rex;
+    rex.add_int64("id", 1).add_str("name", "rex");
+    EXPECT_TRUE(tx.insert("pets", rex, &err)) << err;
+    db_->commit(&tx);
+
+    Record key;
+    key.add_int64("id", 1);
+    EXPECT_FALSE(before.get("pets", &key, &err));
+    EXPECT_EQ(err, "table not found: pets");
+    db_->end_read(&before);
+
+    DBReader after;
+    db_->begin_read(&after);
+    err.clear();
+    EXPECT_TRUE(after.get("pets", &key, &err)) << err;
+    EXPECT_EQ(key.get("name")->str, "rex");
+    db_->end_read(&after);
+}
+
+// A reader on another thread looks tables up and scans through every index while the writer keeps committing rows.
+TEST_F(DBTest, WhenAReaderScansWhileAWriterCommitsThenEverySnapshotAgreesAcrossIndexes) {
+    constexpr int64_t kCommits = 100;
+    std::atomic<bool> done{false};
+    std::thread reader([&] {
+        size_t seen = 0;
+        while (!done) {
+            DBReader tx;
+            db_->begin_read(&tx);
+            std::vector<Row> rows = scan(&tx, Record{}, Record{});
+            EXPECT_EQ(scan(&tx, age_key(I64_MIN), age_key(I64_MAX)), rows) << "(age, id) index";
+            EXPECT_EQ(scan(&tx, city_key(""), city_key("~")), rows) << "(city, age, id) index";
+            db_->end_read(&tx);
+            EXPECT_GE(rows.size(), seen); // rows are only ever added
+            seen = rows.size();
+        }
+    });
+
+    std::vector<Row> rows;
+    for (int64_t id = 1; id <= kCommits; ++id) {
+        rows.push_back({id, "user" + std::to_string(id), 20 + id % 10, id % 2 == 0 ? "sf" : "la"});
+        commit_rows({rows.back()});
+    }
+    done = true;
+    reader.join();
+    expect_committed_rows(rows);
 }

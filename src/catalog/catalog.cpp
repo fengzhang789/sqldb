@@ -87,7 +87,7 @@ bool table_def_check(TableDef* tdef, std::string* err) {
     return true;
 }
 
-std::optional<std::string> Catalog::internal_get(KVTX* tx, const TableDef& tdef, const std::string& pk) {
+std::optional<std::string> Catalog::internal_get(KVReader* tx, const TableDef& tdef, const std::string& pk) {
     auto val = tx->get(internal_key(tdef.prefix, pk));
     if (!val.has_value()) return std::nullopt;
     return std::string(val->begin(), val->end());
@@ -97,7 +97,7 @@ void Catalog::internal_set(KVTX* tx, const TableDef& tdef, const std::string& pk
     tx->set(internal_key(tdef.prefix, pk), std::vector<uint8_t>(val.begin(), val.end()));
 }
 
-std::unique_ptr<TableDef> Catalog::get_table_def_from_kv(KVTX* tx, const std::string& name) {
+std::unique_ptr<TableDef> Catalog::get_table_def_from_kv(KVReader* tx, const std::string& name) {
     auto encoded = internal_get(tx, TDEF_TABLE, name);
     if (!encoded.has_value()) return nullptr;
 

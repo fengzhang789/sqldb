@@ -11,8 +11,12 @@
 #include "storage/kv.h"
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
+#include <algorithm>
+#include <cassert>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -20,6 +24,8 @@
 namespace {
     constexpr char DB_SIG[] = "DB";
     constexpr size_t META_SIG_SIZE = 16;
+    constexpr size_t MIN_MMAP_SIZE = 64uz << 20; // 64 MiB growth floor
+    constexpr size_t MAX_IOVS = 64; // stay well within IOV_MAX per pwritev()
 
     // The 8-byte fields following the signature, in order.
     enum MetaField : size_t {
@@ -113,34 +119,57 @@ int KV::create_file_sync(const std::string& path) {
 void KV::open() {
     fd_ = create_file_sync(path);
     read_root();
-    tree_.pages = &*pages_;
 }
 
 void KV::close() {
     if (fd_ < 0) {
         return;
     }
+    assert(readers_.empty() && "KV::close: a reader is still open");
     ::fsync(fd_);
     ::close(fd_);
     fd_ = -1;
-    pages_.reset();
+    for (const MmapChunk& chunk : chunks_) {
+        ::munmap(chunk.data, chunk.size);
+    }
+    chunks_.clear();
+    mmap_total_ = 0;
 }
 
-// KVTX: reads and writes on the live in-memory tree
-std::optional<std::vector<uint8_t>> KVTX::get(const std::vector<uint8_t>& key) const {
-    return kv_->tree_.get(key);
+// Grows the mmap'd range (never shrinks/moves it) so it covers at least
+// `size` bytes, doubling each time so repeated growth doesn't accumulate
+// too many separate mappings.
+void KV::extend_mmap(size_t size) {
+    if (size <= mmap_total_) {
+        return;
+    }
+
+    size_t alloc = std::max(mmap_total_, MIN_MMAP_SIZE);
+    while (mmap_total_ + alloc < size) {
+        alloc *= 2;
+    }
+
+    void* addr = ::mmap(nullptr, alloc, PROT_READ, MAP_SHARED, fd_, static_cast<off_t>(mmap_total_));
+    if (addr == MAP_FAILED) {
+        throw std::runtime_error("KV: mmap failed");
+    }
+
+    std::lock_guard lock(mu_); // readers copy chunks_
+    chunks_.push_back({static_cast<uint8_t*>(addr), alloc});
+    mmap_total_ += alloc;
 }
 
+// KVTX: writes on the tx's own copy-on-write tree
 void KVTX::set(const std::vector<uint8_t>& key, const std::vector<uint8_t>& val) {
-    kv_->tree_.insert(key, val); // throws (e.g. length limit) without mutating anything
+    tree_.insert(key, val); // throws (e.g. length limit) without mutating anything
 }
 
 bool KVTX::del(const std::vector<uint8_t>& key) {
-    return kv_->tree_.remove(key);
+    return tree_.remove(key);
 }
 
 bool KVTX::update(InsertReq* req) {
-    std::optional<std::vector<uint8_t>> old = kv_->tree_.get(req->key);
+    std::optional<std::vector<uint8_t>> old = get(req->key);
     req->added = !old.has_value();
     req->old = std::move(old).value_or(std::vector<uint8_t>{});
     if ((req->mode == UpdateMode::INSERT_ONLY && !req->added) || (req->mode == UpdateMode::UPDATE_ONLY && req->added)) {
@@ -151,7 +180,7 @@ bool KVTX::update(InsertReq* req) {
 }
 
 bool KVTX::del(DeleteReq* req) {
-    std::optional<std::vector<uint8_t>> old = kv_->tree_.get(req->key);
+    std::optional<std::vector<uint8_t>> old = get(req->key);
     if (!old.has_value()) {
         return false;
     }
@@ -159,35 +188,78 @@ bool KVTX::del(DeleteReq* req) {
     return del(req->key);
 }
 
-BIter KVTX::seek(const std::vector<uint8_t>& key, CMP cmp) const {
-    return kv_->tree_.seek(key, cmp);
+// KVTX: pages. Durable pages are read from the snapshot's mmap, while the tx's writes are buffered by page number,
+// since a reused page is written in place rather than appended.
+const uint8_t* KVTX::page_read(uint64_t ptr) const {
+    if (auto it = page_updates_.find(ptr); it != page_updates_.end()) {
+        return it->second.data(); // the tx may read back a page it has already written
+    }
+    return page_get_mapped(ptr);
+}
+
+BNode KVTX::page_get(uint64_t ptr) const {
+    const uint8_t* page = page_read(ptr);
+    return decode(std::vector<uint8_t>(page, page + BTREE_PAGE_SIZE));
+}
+
+uint64_t KVTX::page_new(const BNode& node) {
+    uint64_t ptr = free_.pop_head();
+    if (ptr == 0) {
+        ptr = kv_->flushed_ + page_append_;
+        ++page_append_;
+    }
+    page_updates_[ptr] = encode(node);
+    return ptr;
+}
+
+void KVTX::page_del(uint64_t ptr) {
+    free_.push_tail(ptr);
+}
+
+uint8_t* KVTX::page_use(uint64_t ptr) {
+    auto it = page_updates_.find(ptr);
+    if (it == page_updates_.end()) {
+        const uint8_t* durable = page_get_mapped(ptr);
+        it = page_updates_.emplace(ptr, std::vector<uint8_t>(durable, durable + BTREE_PAGE_SIZE)).first;
+    }
+    return it->second.data();
+}
+
+uint64_t KVTX::page_append() {
+    uint64_t ptr = kv_->flushed_ + page_append_;
+    ++page_append_;
+    page_updates_[ptr] = std::vector<uint8_t>(BTREE_PAGE_SIZE, 0);
+    return ptr;
 }
 
 // KV: meta page
 std::vector<uint8_t> KV::save_meta() const {
-    const FreeListState& fl = pages_->free_state();
-
     std::vector<uint8_t> data(META_DATA_SIZE, 0);
     std::memcpy(data.data(), DB_SIG, sizeof(DB_SIG) - 1);
-    write_u64(data.data() + meta_offset(META_ROOT), tree_.root);
-    write_u64(data.data() + meta_offset(META_FLUSHED), pages_->flushed_pages());
-    write_u64(data.data() + meta_offset(META_HEAD_PAGE), fl.head_page);
-    write_u64(data.data() + meta_offset(META_HEAD_SEQ), fl.head_seq);
-    write_u64(data.data() + meta_offset(META_TAIL_PAGE), fl.tail_page);
-    write_u64(data.data() + meta_offset(META_TAIL_SEQ), fl.tail_seq);
+    write_u64(data.data() + meta_offset(META_ROOT), root_);
+    write_u64(data.data() + meta_offset(META_FLUSHED), flushed_);
+    write_u64(data.data() + meta_offset(META_HEAD_PAGE), free_.head_page);
+    write_u64(data.data() + meta_offset(META_HEAD_SEQ), free_.head_seq);
+    write_u64(data.data() + meta_offset(META_TAIL_PAGE), free_.tail_page);
+    write_u64(data.data() + meta_offset(META_TAIL_SEQ), free_.tail_seq);
     write_u64(data.data() + meta_offset(META_VERSION), version_);
     return data;
 }
 
 // The meta page isn't written yet for an empty file; it's initialized on
-// the 1st update_root().
+// the 1st commit.
 void KV::read_root() {
     struct stat st;
     if (::fstat(fd_, &st) != 0) {
         throw std::runtime_error(std::string("KV: fstat failed: ") + std::strerror(errno));
     }
     if (st.st_size == 0) {
-        pages_.emplace(fd_);
+        // Page 0 is the meta page and page 1 the free list's first node, which KV::begin buffers until a commit.
+        root_ = 0;
+        version_ = 0;
+        durable_version_ = 0;
+        flushed_ = 2;
+        free_ = FreeListState{.head_page = 1, .head_seq = 0, .tail_page = 1, .tail_seq = 0};
         return;
     }
     if (static_cast<uint64_t>(st.st_size) < META_DATA_SIZE) {
@@ -204,9 +276,9 @@ void KV::read_root() {
     }
 
     Meta meta = parse_meta(data);
-    // A committed file has at least the meta page and 1 free list node, and
-    // every pointer must fall inside it.
-    bool valid = meta.flushed >= 2 && meta.root < meta.flushed &&
+    // A committed file has at least the meta page and 1 free list node, every
+    // pointer must fall inside it, and every commit counts in its version.
+    bool valid = meta.version != 0 && meta.flushed >= 2 && meta.root < meta.flushed &&
                  meta.free_state.head_page != 0 && meta.free_state.head_page < meta.flushed &&
                  meta.free_state.tail_page != 0 && meta.free_state.tail_page < meta.flushed &&
                  meta.free_state.head_seq <= meta.free_state.tail_seq;
@@ -214,10 +286,12 @@ void KV::read_root() {
         throw std::runtime_error("KV: corrupt meta page");
     }
 
-    pages_.emplace(fd_, meta.flushed, meta.free_state);
-    tree_.root = meta.root;
+    root_ = meta.root;
     version_ = meta.version;
     durable_version_ = meta.version;
+    flushed_ = meta.flushed;
+    free_ = meta.free_state;
+    extend_mmap(flushed_ * BTREE_PAGE_SIZE); // map durable pages so transactions can read them right away
 }
 
 void KV::update_root() {
@@ -228,42 +302,71 @@ void KV::update_root() {
 }
 
 // KV: transactions
+void KV::snapshot(KVReader* tx) {
+    tx->version = version_;
+    tx->tree_.root = root_;
+    tx->chunks_ = chunks_;
+}
+
+void KV::begin_read(KVReader* tx) {
+    std::lock_guard lock(mu_);
+    snapshot(tx);
+    tx->tree_.pages = &tx->mapped_;
+    readers_.push(tx);
+}
+
+void KV::end_read(KVReader* tx) {
+    std::lock_guard lock(mu_);
+    readers_.remove(tx->heap_index);
+}
+
 void KV::begin(KVTX* tx) {
+    writer_.lock();
     tx->kv_ = this;
-    tx->root_ = tree_.root;
-    tx->flushed_ = pages_->flushed_pages();
-    tx->free_state_ = pages_->free_state();
-    // Pages freed since the last durable meta page may still be in the tree the file points at.
-    pages_->set_versions(version_, durable_version_);
+    tx->tree_.pages = &tx->pages_;
+    tx->page_updates_.clear();
+    tx->page_append_ = 0;
+    tx->free_ = FreeList(&tx->pages_, free_);
+    tx->free_.version = version_;
+    tx->free_.min_reader = durable_version_; // pages freed since the last durable meta page may be in the file's tree
+    {
+        std::lock_guard lock(mu_);
+        snapshot(tx);
+        const KVReader* oldest = readers_.min();
+        if (oldest != nullptr && version_before(oldest->version, durable_version_)) {
+            tx->free_.min_reader = oldest->version; // pages freed at or after its version may be in its tree
+        }
+    }
+    if (version_ == 0) {
+        tx->page_updates_[1] = std::vector<uint8_t>(BTREE_PAGE_SIZE, 0); // a new file: the free list's empty first node
+    }
 }
 
 void KV::abort(KVTX* tx) {
-    tree_.root = tx->root_;
-    if (tx->root_ == 0) {
-        pages_.emplace(fd_); // nothing committed yet: back to a new file, whose free list node is only buffered
-        return;
-    }
-    pages_->revert(tx->flushed_, tx->free_state_);
+    tx->page_updates_.clear(); // nothing committed references them
+    writer_.unlock();
 }
 
-// 2-phase commit. Phase 1 never overwrites a page the committed version uses (its tree pages are copy-on-write, and
-// free list nodes only change past the committed tail), so if phase 1 fails, the meta page on disk still points at an
-// intact tree and aborting tx is a complete rollback.
+// 2-phase commit. Phase 1 never overwrites a page that the committed version or an open reader uses (tree pages are
+// copy-on-write and only reused once unreachable, and free list nodes only change past the committed tail), so if
+// phase 1 fails, the meta page on disk still points at an intact tree and dropping tx is a complete rollback.
 void KV::commit(KVTX* tx) {
-    if (tree_.root == tx->root_) {
+    std::unique_lock writer(writer_, std::adopt_lock); // released however the commit ends
+    if (tx->tree_.root == root_) {
         return; // no writes: each one moves the root to a newly allocated page
     }
 
-    try {
-        pages_->write_pages();
-        if (::fsync(fd_) != 0) {
-            throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
-        }
-    } catch (...) {
-        abort(tx);
-        throw;
+    write_pages(tx);
+    if (::fsync(fd_) != 0) {
+        throw std::runtime_error(std::string("KV: fsync failed: ") + std::strerror(errno));
     }
-    ++version_;
+    flushed_ += tx->page_append_;
+    free_ = tx->free_.state();
+    {
+        std::lock_guard lock(mu_);
+        root_ = tx->tree_.root;
+        ++version_;
+    }
 
     // Phase 2 is not rolled back. Once the meta page write or its fsync fails, the file may hold either the old or the
     // new root, and reverting memory to the old version would let the next commit overwrite pages the new one uses.
@@ -274,4 +377,26 @@ void KV::commit(KVTX* tx) {
     }
     // This version is durable, so the pages it dropped can now be reused.
     durable_version_ = version_;
+}
+
+// Buffered pages mix appends with in-place rewrites of reused pages, so they're
+// written by page number, coalescing consecutive runs into one pwritev().
+void KV::write_pages(KVTX* tx) {
+    extend_mmap((flushed_ + tx->page_append_) * BTREE_PAGE_SIZE);
+
+    auto& updates = tx->page_updates_;
+    auto it = updates.begin();
+    while (it != updates.end()) {
+        uint64_t first = it->first;
+        std::vector<iovec> iovs;
+        for (uint64_t ptr = first; it != updates.end() && it->first == ptr && iovs.size() < MAX_IOVS; ++it, ++ptr) {
+            iovs.push_back(iovec{it->second.data(), it->second.size()});
+        }
+
+        off_t offset = static_cast<off_t>(first * BTREE_PAGE_SIZE);
+        ssize_t want = static_cast<ssize_t>(iovs.size() * BTREE_PAGE_SIZE);
+        if (::pwritev(fd_, iovs.data(), static_cast<int>(iovs.size()), offset) != want) {
+            throw std::runtime_error("KV: pwritev failed");
+        }
+    }
 }

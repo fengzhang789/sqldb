@@ -34,7 +34,7 @@ bool table_def_check(TableDef* tdef, std::string* err);
 // TableDef and going the other way would be circular.
 struct Catalog {
     // Checks the in-memory cache, falling back to a read from @table through tx. Returns nullptr if the table doesn't
-    // exist.
+    // exist. Only write transactions use the cache, and KV runs them one at a time, so it needs no lock of its own.
     const TableDef* get_table_def(KVTX* tx, const std::string& name);
 
     // Validates the schema, allocates KV key prefixes for the table and each index, and writes the definition into
@@ -44,15 +44,15 @@ struct Catalog {
     // Drops every cached def (invalidating pointers from get_table_def), e.g. once a rollback may have removed one.
     void clear_cache();
 
-private:
-    // Reads a TableDef straight from @table, bypassing the cache.
-    std::unique_ptr<TableDef> get_table_def_from_kv(KVTX* tx, const std::string& name);
+    // Reads a TableDef straight from @table through tx, bypassing the cache, as readers do.
+    std::unique_ptr<TableDef> get_table_def_from_kv(KVReader* tx, const std::string& name);
 
+private:
     // Allocates n consecutive prefixes from @meta["next_prefix"] (default TABLE_PREFIX_MIN if absent); returns the first.
     uint32_t alloc_prefix(KVTX* tx, uint32_t n);
 
     // Raw KV access to @meta/@table: key = 4-byte big-endian prefix + primary-key bytes.
-    std::optional<std::string> internal_get(KVTX* tx, const TableDef& tdef, const std::string& pk);
+    std::optional<std::string> internal_get(KVReader* tx, const TableDef& tdef, const std::string& pk);
     void internal_set(KVTX* tx, const TableDef& tdef, const std::string& pk, const std::string& val);
 
     std::unordered_map<std::string, std::unique_ptr<TableDef>> cache_;

@@ -18,7 +18,7 @@ namespace {
     constexpr uint64_t kFirstFreedPage = 1000;
 
     // Stands in for the file: any page can be read or written, as every page
-    // below the real page manager's flushed count is mapped.
+    // below KV's flushed count is mapped.
     class FakePages : public IFreeListPages {
         public:
             const uint8_t* read_page(uint64_t ptr) const override {

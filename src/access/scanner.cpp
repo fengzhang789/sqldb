@@ -72,7 +72,7 @@ void Scanner::deref(Record* rec) const {
     *rec = std::move(row);
 }
 
-bool db_scan(KVTX* tx, const TableDef& tdef, Scanner* req, std::string* err) {
+bool db_scan(KVReader* tx, const TableDef& tdef, Scanner* req, std::string* err) {
     req->iter_ = BIter{}; // a failed scan leaves req invalid
     if (!(req->cmp1 > 0 && req->cmp2 < 0) && !(req->cmp1 < 0 && req->cmp2 > 0)) {
         *err = "bad range: cmp1 and cmp2 must point in opposite directions";

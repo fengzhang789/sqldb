@@ -45,6 +45,16 @@ namespace {
             return ok;
         }
 
+        // Runs one read-only access call in its own read transaction.
+        template <typename Fn, typename... Args>
+        bool in_reader(Fn fn, Args&&... args) {
+            KVReader tx;
+            kv_->begin_read(&tx);
+            bool ok = fn(&tx, std::forward<Args>(args)...);
+            kv_->end_read(&tx);
+            return ok;
+        }
+
         Record full_row(int64_t id, const std::string& name, int64_t age) {
             Record rec;
             rec.add_int64("id", id).add_str("name", name).add_int64("age", age);
@@ -68,7 +78,7 @@ TEST_F(TableAccessTest, WhenARowIsUpsertedThenDbGetRoundTripsIt) {
     ASSERT_TRUE(in_tx(db_update,tdef_, full_row(1, "alice", 30), UpdateMode::UPSERT, &err)) << err;
 
     Record rec = pk_only(1);
-    ASSERT_TRUE(in_tx(db_get,tdef_, &rec, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &rec, &err)) << err;
 
     const Value* name = rec.get("name");
     const Value* age = rec.get("age");
@@ -81,7 +91,7 @@ TEST_F(TableAccessTest, WhenARowIsUpsertedThenDbGetRoundTripsIt) {
 TEST_F(TableAccessTest, WhenTheRowIsMissingThenDbGetReturnsFalseWithNoError) {
     std::string err;
     Record rec = pk_only(999);
-    EXPECT_FALSE(in_tx(db_get,tdef_, &rec, &err));
+    EXPECT_FALSE(in_reader(db_get,tdef_, &rec, &err));
     EXPECT_TRUE(err.empty());
 }
 
@@ -91,7 +101,7 @@ TEST_F(TableAccessTest, WhenTheRowAlreadyExistsThenUpsertOverwritesIt) {
     ASSERT_TRUE(in_tx(db_update,tdef_, full_row(1, "alice", 31), UpdateMode::UPSERT, &err)) << err;
 
     Record rec = pk_only(1);
-    ASSERT_TRUE(in_tx(db_get,tdef_, &rec, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &rec, &err)) << err;
     EXPECT_EQ(rec.get("age")->int64, 31);
 }
 
@@ -103,7 +113,7 @@ TEST_F(TableAccessTest, WhenTheRowAlreadyExistsThenInsertOnlyFails) {
 
     // The failed insert must not have overwritten the row.
     Record rec = pk_only(1);
-    ASSERT_TRUE(in_tx(db_get,tdef_, &rec, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &rec, &err)) << err;
     EXPECT_EQ(rec.get("age")->int64, 30);
 }
 
@@ -118,7 +128,7 @@ TEST_F(TableAccessTest, WhenTheRowDoesNotExistThenUpdateOnlyFails) {
     EXPECT_FALSE(err.empty());
 
     Record rec = pk_only(1);
-    EXPECT_FALSE(in_tx(db_get,tdef_, &rec, &err));
+    EXPECT_FALSE(in_reader(db_get,tdef_, &rec, &err));
 }
 
 TEST_F(TableAccessTest, WhenTheRowAlreadyExistsThenUpdateOnlySucceeds) {
@@ -127,7 +137,7 @@ TEST_F(TableAccessTest, WhenTheRowAlreadyExistsThenUpdateOnlySucceeds) {
     EXPECT_TRUE(in_tx(db_update,tdef_, full_row(1, "alice", 31), UpdateMode::UPDATE_ONLY, &err)) << err;
 
     Record rec = pk_only(1);
-    ASSERT_TRUE(in_tx(db_get,tdef_, &rec, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &rec, &err)) << err;
     EXPECT_EQ(rec.get("age")->int64, 31);
 }
 
@@ -138,7 +148,7 @@ TEST_F(TableAccessTest, WhenDbDeleteIsCalledThenTheRowIsRemoved) {
     EXPECT_TRUE(in_tx(db_delete,tdef_, pk_only(1), &err));
 
     Record rec = pk_only(1);
-    EXPECT_FALSE(in_tx(db_get,tdef_, &rec, &err));
+    EXPECT_FALSE(in_reader(db_get,tdef_, &rec, &err));
 }
 
 TEST_F(TableAccessTest, WhenTheRowIsMissingThenDbDeleteReturnsFalse) {
@@ -162,8 +172,8 @@ TEST_F(TableAccessTest, WhenMultipleRowsExistThenEachIsIndependentlyAddressable)
 
     Record r1 = pk_only(1);
     Record r2 = pk_only(2);
-    ASSERT_TRUE(in_tx(db_get,tdef_, &r1, &err)) << err;
-    ASSERT_TRUE(in_tx(db_get,tdef_, &r2, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &r1, &err)) << err;
+    ASSERT_TRUE(in_reader(db_get,tdef_, &r2, &err)) << err;
 
     EXPECT_EQ(r1.get("name")->str, "alice");
     EXPECT_EQ(r2.get("name")->str, "bob");
@@ -175,7 +185,7 @@ TEST_F(TableAccessTest, WhenDbGetIsGivenANonPrimaryKeyColumnThenItFailsWithAnErr
 
     Record rec = pk_only(1);
     rec.add_str("name", "alice");
-    EXPECT_FALSE(in_tx(db_get,tdef_, &rec, &err));
+    EXPECT_FALSE(in_reader(db_get,tdef_, &rec, &err));
     EXPECT_FALSE(err.empty());
 }
 

@@ -23,10 +23,15 @@ add_executable(kv_tests
 )
 target_link_libraries(kv_tests PRIVATE storage GTest::gtest_main)
 
-add_executable(pagemanager_tests
-    pagemanager_test.cpp
+add_executable(kv_reader_tests
+    kv_reader_test.cpp
 )
-target_link_libraries(pagemanager_tests PRIVATE storage GTest::gtest_main)
+target_link_libraries(kv_reader_tests PRIVATE storage GTest::gtest_main)
+
+add_executable(kv_concurrency_tests
+    kv_concurrency_test.cpp
+)
+target_link_libraries(kv_concurrency_tests PRIVATE storage GTest::gtest_main)
 
 add_executable(freelist_tests
     freelist_test.cpp
@@ -81,7 +86,8 @@ gtest_discover_tests(order_preserving_tests)
 gtest_discover_tests(scanner_tests)
 gtest_discover_tests(index_tests)
 gtest_discover_tests(kv_tests)
-gtest_discover_tests(pagemanager_tests)
+gtest_discover_tests(kv_reader_tests)
+gtest_discover_tests(kv_concurrency_tests)
 gtest_discover_tests(freelist_tests)
 gtest_discover_tests(reader_heap_tests)
 gtest_discover_tests(catalog_tests)

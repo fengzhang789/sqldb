@@ -86,8 +86,8 @@ namespace {
         return std::string(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
 
-    // The live tree root, through the pointer every BIter keeps to its tree.
-    uint64_t live_root(const KVTX& tx) {
+    // The root of the tree tx reads, through the pointer every BIter keeps to its tree.
+    uint64_t live_root(const KVReader& tx) {
         return tx.seek(bytes("key"), CMP_GE).tree->root;
     }
 
@@ -96,10 +96,10 @@ namespace {
         using KV::KV;
 
         std::optional<std::vector<uint8_t>> get(const std::vector<uint8_t>& key) {
-            KVTX tx;
-            begin(&tx);
+            KVReader tx;
+            begin_read(&tx);
             std::optional<std::vector<uint8_t>> val = tx.get(key);
-            commit(&tx);
+            end_read(&tx);
             return val;
         }
 
@@ -425,6 +425,18 @@ TEST_F(KVTest, RecoversOnceATemporaryWriteErrorIsResolved) {
 // ============================================================================
 // Page reuse
 // ============================================================================
+TEST_F(KVTest, WhenTheFirstTransactionCommitsThenTheFileHoldsTheMetaPageTheFreeListNodeAndTheTree) {
+    AutoCommitKV db(path_);
+    db.open();
+    db.set(bytes("a"), bytes("1"));
+
+    // Page 0 is the meta page and page 1 the free list's first node, so the tree's pages start at 2.
+    EXPECT_EQ(file_pages(path_), 3u);
+    EXPECT_EQ(read_meta_field(path_, kMetaFlushed), 3u);
+    EXPECT_EQ(read_meta_field(path_, kMetaRoot), 2u);
+    EXPECT_EQ(read_meta_field(path_, kMetaHeadPage), 1u);
+}
+
 TEST_F(KVTest, WhenUpdatesRunThenTheMetaPageRecordsTheFreeListPosition) {
     AutoCommitKV db(path_);
     db.open();
@@ -719,13 +731,13 @@ TEST_F(KVTest, WhenATransactionCommitsThenAReopenedKvSeesAllOfItsWrites) {
 
     KV db(path_);
     db.open();
-    KVTX tx;
-    db.begin(&tx);
+    KVReader tx;
+    db.begin_read(&tx);
     EXPECT_EQ(tx.get(key(1)), bytes("updated"));
     for (int i = 2; i < kCount; ++i) {
         EXPECT_EQ(tx.get(key(i)), i % 2 == 0 ? std::nullopt : std::optional(value(i))) << "key " << i;
     }
-    db.abort(&tx);
+    db.end_read(&tx);
 }
 
 TEST_F(KVTest, WhenATransactionAbortsAfterManyWritesThenTheFileAndTheTreeAreUnchanged) {
@@ -759,13 +771,13 @@ TEST_F(KVTest, WhenATransactionAbortsAfterManyWritesThenTheFileAndTheTreeAreUnch
 
     EXPECT_EQ(file_contents(path_), before);
     auto expect_original = [&](KV& kv) {
-        KVTX after;
-        kv.begin(&after);
+        KVReader after;
+        kv.begin_read(&after);
         EXPECT_EQ(live_root(after), root);
         for (int i = 0; i < 3 * kCount; ++i) {
             EXPECT_EQ(after.get(key(i)), i < kCount ? std::optional(value(i)) : std::nullopt) << "key " << i;
         }
-        kv.abort(&after);
+        kv.end_read(&after);
     };
     expect_original(db);
     db.close();
@@ -853,12 +865,12 @@ TEST_F(KVTest, WhenWritingPagesFailsThenCommitRollsBackToTheRootAtBegin) {
 
     KV reopened(path_);
     reopened.open();
-    KVTX check;
-    reopened.begin(&check);
+    KVReader check;
+    reopened.begin_read(&check);
     for (int i = 0; i < 2 * kCount; ++i) {
         EXPECT_EQ(check.get(key(i)), i < kCount && i % 2 == 1 ? std::optional(value(i)) : std::nullopt) << "key " << i;
     }
-    reopened.abort(&check);
+    reopened.end_read(&check);
 }
 
 TEST_F(KVTest, WhenWritesToANewFileAreAbortedThenALaterTransactionCanStillCommit) {
@@ -881,13 +893,13 @@ TEST_F(KVTest, WhenWritesToANewFileAreAbortedThenALaterTransactionCanStillCommit
 
     KV reopened(path_);
     reopened.open();
-    KVTX check;
-    reopened.begin(&check);
+    KVReader check;
+    reopened.begin_read(&check);
     EXPECT_EQ(check.get(bytes("a")), std::nullopt);
     EXPECT_EQ(check.get(bytes("b")), std::nullopt);
     EXPECT_EQ(check.get(bytes("c")), bytes("3"));
     EXPECT_EQ(check.get(bytes("d")), bytes("4"));
-    reopened.abort(&check);
+    reopened.end_read(&check);
 }
 
 // Random transactions, each committed or aborted, checked against a std::map across reopens: an abort that missed any
@@ -897,13 +909,13 @@ TEST_F(KVTest, WhenRandomTransactionsCommitOrAbortThenOnlyTheCommittedWritesAreK
     std::mt19937 rng(20260915);
 
     auto expect_model = [&](KV& kv) {
-        KVTX tx;
-        kv.begin(&tx);
+        KVReader tx;
+        kv.begin_read(&tx);
         for (int k = 0; k < 150; ++k) {
             auto it = model.find(key(k));
             EXPECT_EQ(tx.get(key(k)), it == model.end() ? std::nullopt : std::optional(it->second)) << "key " << k;
         }
-        kv.abort(&tx);
+        kv.end_read(&tx);
     };
 
     for (int session = 0; session < 3; ++session) {

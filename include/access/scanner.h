@@ -27,8 +27,8 @@ struct Scanner {
     void deref(Record* rec) const; // replaces *rec with the current row, in tdef column order; requires valid()
 
 private:
-    friend bool db_scan(KVTX* tx, const TableDef& tdef, Scanner* req, std::string* err);
-    KVTX* tx_ = nullptr; // index scans fetch each row through this by primary key
+    friend bool db_scan(KVReader* tx, const TableDef& tdef, Scanner* req, std::string* err);
+    KVReader* tx_ = nullptr; // index scans fetch each row through this by primary key
     const TableDef* tdef_ = nullptr;
     BIter iter_;
     std::vector<uint8_t> key_end_; // encoded key2
@@ -37,4 +37,4 @@ private:
 // Positions req at the first row of its range; false with *err set if cmp1/cmp2 don't point in opposite directions,
 // no index starts with key1's columns, or either bound doesn't fit that index's columns and types. tx and tdef must
 // outlive req, and tx must not write while req is in use.
-bool db_scan(KVTX* tx, const TableDef& tdef, Scanner* req, std::string* err);
+bool db_scan(KVReader* tx, const TableDef& tdef, Scanner* req, std::string* err);

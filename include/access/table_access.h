@@ -11,7 +11,7 @@
 // Point query by primary key (rec supplies exactly the pk columns, in any order), run as the range scan [rec, rec]; on
 // a hit, *rec is replaced by the full row in tdef column order. Returns false with *err unset if the row doesn't
 // exist, or false with *err set if rec is malformed.
-bool db_get(KVTX* tx, const TableDef& tdef, Record* rec, std::string* err);
+bool db_get(KVReader* tx, const TableDef& tdef, Record* rec, std::string* err);
 
 // Insert/update a full row (rec must supply every column) per mode, keeping secondary indexes in sync in the same tx;
 // false with *err set if rec is malformed or mode's existence requirement isn't met. A throw (e.g. an index key over

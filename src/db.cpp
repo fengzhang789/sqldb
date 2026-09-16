@@ -2,23 +2,62 @@
 
 #include "access/table_access.h"
 
+void DB::begin_read(DBReader* tx) {
+    tx->db_ = this;
+    tx->tables_.clear();
+    kv_->begin_read(&tx->kv_reader_);
+}
+
+void DB::end_read(DBReader* tx) {
+    kv_->end_read(&tx->kv_reader_);
+}
+
 void DB::begin(DBTX* tx) {
     tx->db_ = this;
+    tx->created_table_ = false;
     kv_->begin(&tx->kv_tx_);
 }
 
+// The catalog cache must only hold committed defs, but tx may have cached one for a table it created. It is dropped
+// before the commit rather than after a failed one, since by then the writer lock that guards the cache is released.
 void DB::commit(DBTX* tx) {
-    try {
-        kv_->commit(&tx->kv_tx_);
-    } catch (...) {
-        catalog_.clear_cache(); // the commit may have rolled back tables the cache read through tx
-        throw;
+    if (tx->created_table_) {
+        catalog_.clear_cache();
     }
+    kv_->commit(&tx->kv_tx_);
 }
 
 void DB::abort(DBTX* tx) {
+    if (tx->created_table_) {
+        catalog_.clear_cache(); // while the writer lock is still held, as in commit
+    }
     kv_->abort(&tx->kv_tx_);
-    catalog_.clear_cache(); // it may hold tables that only existed in tx
+}
+
+// Readers skip the catalog cache, which only write transactions may touch; each def lives as long as the reader.
+const TableDef* DBReader::find_table(const std::string& table, std::string* err) {
+    auto it = tables_.find(table);
+    if (it == tables_.end()) {
+        std::unique_ptr<TableDef> tdef = db_->catalog_.get_table_def_from_kv(&kv_reader_, table);
+        if (!tdef) {
+            *err = "table not found: " + table;
+            return nullptr;
+        }
+        it = tables_.emplace(table, std::move(tdef)).first;
+    }
+    return it->second.get();
+}
+
+bool DBReader::get(const std::string& table, Record* rec, std::string* err) {
+    const TableDef* tdef = find_table(table, err);
+    if (tdef == nullptr) return false;
+    return db_get(&kv_reader_, *tdef, rec, err);
+}
+
+bool DBReader::scan(const std::string& table, Scanner* req, std::string* err) {
+    const TableDef* tdef = find_table(table, err);
+    if (tdef == nullptr) return false;
+    return db_scan(&kv_reader_, *tdef, req, err);
 }
 
 const TableDef* DBTX::find_table(const std::string& table, std::string* err) {
@@ -30,7 +69,9 @@ const TableDef* DBTX::find_table(const std::string& table, std::string* err) {
 }
 
 bool DBTX::table_new(TableDef def, std::string* err) {
-    return db_->catalog_.table_new(&kv_tx_, std::move(def), err);
+    if (!db_->catalog_.table_new(&kv_tx_, std::move(def), err)) return false;
+    created_table_ = true;
+    return true;
 }
 
 bool DBTX::get(const std::string& table, Record* rec, std::string* err) {

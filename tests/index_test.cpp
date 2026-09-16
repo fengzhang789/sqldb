@@ -181,6 +181,16 @@ namespace {
             return ok;
         }
 
+        // Runs one read-only access call in its own read transaction.
+        template <typename Fn, typename... Args>
+        bool in_reader(Fn fn, Args&&... args) {
+            KVReader tx;
+            kv_->begin_read(&tx);
+            bool ok = fn(&tx, std::forward<Args>(args)...);
+            kv_->end_read(&tx);
+            return ok;
+        }
+
         void upsert(const Row& row) {
             std::string err;
             ASSERT_TRUE(in_tx(db_update, *users_, to_record(row), UpdateMode::UPSERT, &err)) << err;
@@ -200,8 +210,8 @@ namespace {
         std::vector<std::string> index_keys(size_t index_no) {
             std::string prefix = encode_key(users_->index_prefixes[index_no], {});
             std::vector<std::string> keys;
-            KVTX tx;
-            kv_->begin(&tx);
+            KVReader tx;
+            kv_->begin_read(&tx);
             for (BIter it = tx.seek(std::vector<uint8_t>(prefix.begin(), prefix.end()), CMP_GE); it.valid(); it.next()) {
                 auto [key, val] = it.deref();
                 std::string k(key.begin(), key.end());
@@ -211,7 +221,7 @@ namespace {
                 EXPECT_TRUE(val.empty());
                 keys.push_back(std::move(k));
             }
-            kv_->commit(&tx);
+            kv_->end_read(&tx);
             return keys;
         }
 
@@ -234,8 +244,8 @@ namespace {
 
         // Scans users_, checking the chosen index and that every row comes back whole, in tdef column order.
         std::vector<Row> scan(CMP cmp1, const Record& key1, CMP cmp2, const Record& key2, int index_no) {
-            KVTX tx;
-            kv_->begin(&tx);
+            KVReader tx;
+            kv_->begin_read(&tx);
             Scanner sc(cmp1, cmp2, key1, key2);
             std::string err;
             EXPECT_TRUE(db_scan(&tx, *users_, &sc, &err)) << err;
@@ -248,7 +258,7 @@ namespace {
                 EXPECT_EQ(rec.cols, users_->cols);
                 rows.push_back(from_record(rec));
             }
-            kv_->commit(&tx);
+            kv_->end_read(&tx);
             return rows;
         }
 
@@ -416,7 +426,7 @@ TEST_F(IndexTest, WhenNoIndexStartsWithKey1ThenDbScanFails) {
     for (const Record& key : {name, age_city, city_id}) {
         Scanner sc(CMP_GE, CMP_LE, key, key);
         std::string err;
-        EXPECT_FALSE(in_tx(db_scan,*users_, &sc, &err)) << describe(key);
+        EXPECT_FALSE(in_reader(db_scan,*users_, &sc, &err)) << describe(key);
         EXPECT_FALSE(err.empty());
         EXPECT_FALSE(sc.valid());
     }
@@ -435,7 +445,7 @@ TEST_F(IndexTest, WhenABoundDoesNotFitTheIndexKey1PicksThenDbScanFails) {
     for (const auto& [key1, key2] : cases) {
         Scanner sc(CMP_GE, CMP_LE, key1, key2);
         std::string err;
-        EXPECT_FALSE(in_tx(db_scan,*users_, &sc, &err)) << describe(key1) << " " << describe(key2);
+        EXPECT_FALSE(in_reader(db_scan,*users_, &sc, &err)) << describe(key1) << " " << describe(key2);
         EXPECT_FALSE(err.empty());
         EXPECT_FALSE(sc.valid());
     }
