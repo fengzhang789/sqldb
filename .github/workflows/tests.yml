@@ -25,7 +25,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/_deps
-          key: ${{ runner.os }}-fetchcontent-${{ hashFiles('tests/CMakeLists.txt') }}
+          key: ${{ runner.os }}-fetchcontent-v2-${{ hashFiles('tests/CMakeLists.txt') }}
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
