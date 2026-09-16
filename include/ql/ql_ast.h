@@ -65,8 +65,8 @@ QLNode ql_tuple(std::vector<QLNode> kids);
 std::string to_string(const QLNode& node);
 
 // QLScan is the row source shared by SELECT/UPDATE/DELETE. key1/key2 are the book's INDEX BY range bounds; this
-// parser implements WHERE instead (see ql/ql_parse.h) and always leaves them QL_UNINIT, but they stay in the struct
-// so the executor sees one scan shape either way and reads an uninitialized range as "scan everything, then filter".
+// parser implements WHERE instead (see ql/ql_parse.h) and always leaves them QL_UNINIT, because the executor derives
+// the index range from the filter itself (see ql/ql_range.h).
 struct QLScan {
     std::string table;
     QLNode key1; // INDEX BY lower bound; always QL_UNINIT here

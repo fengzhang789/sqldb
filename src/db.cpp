@@ -60,6 +60,10 @@ bool DBReader::scan(const std::string& table, Scanner* req, std::string* err) {
     return db_scan(&kv_reader_, *tdef, req, err);
 }
 
+const TableDef* DBReader::table_def(const std::string& table, std::string* err) {
+    return find_table(table, err);
+}
+
 const TableDef* DBTX::find_table(const std::string& table, std::string* err) {
     const TableDef* tdef = db_->catalog_.get_table_def(&kv_tx_, table);
     if (tdef == nullptr) {
@@ -108,4 +112,8 @@ bool DBTX::scan(const std::string& table, Scanner* req, std::string* err) {
     const TableDef* tdef = find_table(table, err);
     if (tdef == nullptr) return false;
     return db_scan(&kv_tx_, *tdef, req, err);
+}
+
+const TableDef* DBTX::table_def(const std::string& table, std::string* err) {
+    return find_table(table, err);
 }

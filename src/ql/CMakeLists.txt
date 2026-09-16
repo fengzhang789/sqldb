@@ -24,6 +24,8 @@ add_flex_bison_dependency(ql_lexer ql_parser)
 add_library(ql
     ql_ast.cpp
     ql_parse.cpp
+    ql_range.cpp
+    ql_exec.cpp
     ${BISON_ql_parser_OUTPUTS}
     ${FLEX_ql_lexer_OUTPUTS}
 )
@@ -31,4 +33,4 @@ target_include_directories(ql
     PUBLIC ${PROJECT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_BINARY_DIR} # the generated parser.tab.hh, location.hh and lexer.yy.h
 )
-target_link_libraries(ql PUBLIC catalog storage)
+target_link_libraries(ql PUBLIC db_api catalog storage)

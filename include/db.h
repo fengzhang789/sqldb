@@ -18,6 +18,7 @@ class DBReader {
     public:
         bool get(const std::string& table, Record* rec, std::string* err);
         bool scan(const std::string& table, Scanner* req, std::string* err); // req is only usable until the reader ends
+        const TableDef* table_def(const std::string& table, std::string* err); // nullptr if absent; lives as long as the reader
 
     private:
         friend class DB;
@@ -38,6 +39,7 @@ class DBTX {
         bool upsert(const std::string& table, const Record& rec, std::string* err);
         bool del(const std::string& table, const Record& rec, std::string* err);
         bool scan(const std::string& table, Scanner* req, std::string* err); // req is only usable until the tx ends
+        const TableDef* table_def(const std::string& table, std::string* err); // nullptr if absent; lives until the tx ends
 
     private:
         friend class DB;

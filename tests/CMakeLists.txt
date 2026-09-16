@@ -81,7 +81,17 @@ target_link_libraries(db_tests PRIVATE db_api GTest::gtest_main)
 add_executable(ql_parse_tests
     ql_parse_test.cpp
 )
-target_link_libraries(ql_parse_tests PRIVATE ql catalog storage GTest::gtest_main)
+target_link_libraries(ql_parse_tests PRIVATE ql GTest::gtest_main) # ql already carries catalog and storage
+
+add_executable(ql_range_tests
+    ql_range_test.cpp
+)
+target_link_libraries(ql_range_tests PRIVATE ql GTest::gtest_main)
+
+add_executable(ql_exec_tests
+    ql_exec_test.cpp
+)
+target_link_libraries(ql_exec_tests PRIVATE ql GTest::gtest_main) # ql already carries db_api, access, catalog and storage
 
 include(GoogleTest)
 gtest_discover_tests(db_tests)
@@ -99,3 +109,5 @@ gtest_discover_tests(catalog_tests)
 gtest_discover_tests(row_codec_tests)
 gtest_discover_tests(table_access_tests)
 gtest_discover_tests(ql_parse_tests)
+gtest_discover_tests(ql_range_tests)
+gtest_discover_tests(ql_exec_tests)
