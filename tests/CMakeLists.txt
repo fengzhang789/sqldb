@@ -78,6 +78,11 @@ add_executable(db_tests
 )
 target_link_libraries(db_tests PRIVATE db_api GTest::gtest_main)
 
+add_executable(ql_parse_tests
+    ql_parse_test.cpp
+)
+target_link_libraries(ql_parse_tests PRIVATE ql catalog storage GTest::gtest_main)
+
 include(GoogleTest)
 gtest_discover_tests(db_tests)
 gtest_discover_tests(btree_tests)
@@ -93,3 +98,4 @@ gtest_discover_tests(reader_heap_tests)
 gtest_discover_tests(catalog_tests)
 gtest_discover_tests(row_codec_tests)
 gtest_discover_tests(table_access_tests)
+gtest_discover_tests(ql_parse_tests)

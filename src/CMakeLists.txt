@@ -2,6 +2,7 @@ add_subdirectory(storage)
 add_subdirectory(catalog)
 add_subdirectory(encoding)
 add_subdirectory(access)
+add_subdirectory(ql)
 
 # Library containing the top-level DB API and its transactions, shared by the executable and tests.
 add_library(db_api
